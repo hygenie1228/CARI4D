@@ -50,9 +50,9 @@ class SMPLLayer(Module):
         if self.hands:
             assert self.gender in ['male', 'female'], \
                 'SMPL-H model only supports male or female, not {}'.format(self.gender)
-            self.model_path = os.path.join(model_root, f"SMPLH_{self.gender}.pkl")
+            self.model_path = os.path.join(model_root, 'smplh', f"SMPLH_{self.gender.upper()}.pkl")
         else:
-            self.model_path = os.path.join(model_root, f"SMPL_{self.gender}.pkl")
+            self.model_path = os.path.join(model_root, 'smpl',f"SMPL_{self.gender.upper()}.pkl")
 
         model_data = load_smpl_model_data(self.model_path)
         self.smpl_data = model_data

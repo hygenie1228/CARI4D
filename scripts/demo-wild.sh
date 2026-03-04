@@ -20,15 +20,15 @@ set -e
 # --masks_root data/cari4d-demo/wild/masks/ --hy3d_root=data/cari4d-demo/meshes \
 # --video ${video} -o data/cari4d-demo/wild/fp-hy3d3-track
 
-# # Step 5: run CoCoNet to refine human + object
-# python run_horefine.py config=learning/configs/cari4d-release.yml split_file=splits/demo-behave.json \
-# use_sel_view=True render_video=True identifier=_demo use_intermediate=False data_name=test-only \
-# hy3d_meshes_root=data/cari4d-demo/meshes \
-# masks_root=data/cari4d-demo/wild/masks/ \
-# fp_root=data/cari4d-demo/wild/fp-hy3d3-track \
-# nlf_root=data/cari4d-demo/wild/genmo \
-# video=${video}  cam_id=0 wild_video=True \
-# outpath=output/coconet
+# Step 5: run CoCoNet to refine human + object
+python run_horefine.py config=learning/configs/cari4d-release.yml split_file=splits/demo-behave.json \
+use_sel_view=True render_video=True identifier=_demo use_intermediate=False data_name=test-only \
+hy3d_meshes_root=data/cari4d-demo/meshes \
+masks_root=data/cari4d-demo/wild/masks/ \
+fp_root=data/cari4d-demo/wild/fp-hy3d3-track \
+nlf_root=data/cari4d-demo/wild/genmo \
+video=${video}  cam_id=0 wild_video=True \
+outpath=output/coconet
 
 # Step 6: run joint optimization
 python learning/training/opt_refineout.py num_steps=3000 w_acc_v=600 w_contact=300  save_name=optv2 batch_size=192 opt_rot=True \
