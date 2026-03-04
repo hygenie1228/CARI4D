@@ -133,23 +133,23 @@ _mesh_template = {
 }
 
 # for HODome: lambda function to get template path given obj_name
-get_hodome_template_path = lambda obj_name: f"/home/xianghuix/datasets/HODome/obj-newtex/{obj_name}/{obj_name}.obj"
+get_hodome_template_path = lambda obj_name: f"data/hodome/obj-newtex/{obj_name}/{obj_name}.obj"
 _hodome_objs = ['badminton', 'bigsofa', 'box', 'chair', 'flower', 'monitor', 'pillow', 'pink', 'table', 'tennis', 'trolleycase', 'baseball', 'book', 'case', 'desk', 'keyboard', 'pan', 'pingpong', 'smallsofa', 'tabletall', 'talltable', 'trashcan']
 # IHMD: bat  broom  chair  dumbbell  kettlebell  pan  skateboard  suitcase  tennis
 _imhd_objs = ['bat', 'broom', 'chair', 'dumbbell', 'kettlebell', 'pan', 'skateboard', 'suitcase', 'tennis']
 
 
 _icap_template = {
-    'obj01': '/home/xianghuix/datasets/InterCap/objects/01.ply', #'suitcase'
-    'obj02': '/home/xianghuix/datasets/InterCap/objects/02.ply', #  'skateboard'
-    'obj03': '/home/xianghuix/datasets/InterCap/objects/03.ply', # 'football'
-    'obj04': '/home/xianghuix/datasets/InterCap/objects/04.ply', # 'umbrella'
-    'obj05': '/home/xianghuix/datasets/InterCap/objects/05.ply', # 'tennis-racket'
-    'obj06': '/home/xianghuix/datasets/InterCap/objects/06.ply', # toolbox
-    'obj07': '/home/xianghuix/datasets/InterCap/objects/07.ply', #  chair01
-    'obj08': '/home/xianghuix/datasets/InterCap/objects/08.ply', #'bottle'
-    'obj09': '/home/xianghuix/datasets/InterCap/objects/09.ply', # 'cup'
-    'obj10': '/home/xianghuix/datasets/InterCap/objects/10.ply', # 'chair02', stool
+    'obj01': 'data/intercap/objects/01.ply', #'suitcase'
+    'obj02': 'data/intercap/objects/02.ply', #  'skateboard'
+    'obj03': 'data/intercap/objects/03.ply', # 'football'
+    'obj04': 'data/intercap/objects/04.ply', # 'umbrella'
+    'obj05': 'data/intercap/objects/05.ply', # 'tennis-racket'
+    'obj06': 'data/intercap/objects/06.ply', # toolbox
+    'obj07': 'data/intercap/objects/07.ply', #  chair01
+    'obj08': 'data/intercap/objects/08.ply', #'bottle'
+    'obj09': 'data/intercap/objects/09.ply', # 'cup'
+    'obj10': 'data/intercap/objects/10.ply', # 'chair02', stool
 }
 
 # path to original full-reso scan reconstructions
@@ -203,11 +203,11 @@ def get_render_template_path_from_seq(seq_name):
         return json.load(open('splits/procigen-video-obj-path.json', 'r'))[seq_name]
     elif 'Date' in date:
         obj_name = seq_name.split('_')[2]
-        dataset_path = '/home/xianghuix/datasets/behave'
+        dataset_path = 'data/behave'
         return join(dataset_path, 'objects', f'{obj_name}/{obj_name}.obj')
     elif '2023' in date:
         obj_name = seq_name.split('_')[2]
-        mesh_file = f'/home/xianghuix/datasets/IMHD2/hy3d-texgen-simp/{obj_name}/{obj_name}_simplified_transformed.obj'
+        mesh_file = f'data/imhd2/hy3d-texgen-simp/{obj_name}/{obj_name}_simplified_transformed.obj'
         return mesh_file
     else:
         raise ValueError(f'{seq_name} not found in template paths!')
@@ -254,7 +254,7 @@ def load_templates_all(dataset_path=None, orig=True, aligned=False):
         temp.vertices = temp.vertices - np.mean(temp.vertices, 0)
         out['hodome+' + obj] = temp
     for obj in _imhd_objs:
-        temp_file = f'/home/xianghuix/datasets/IMHD2/hy3d-texgen-simp/{obj}/{obj}_simplified_transformed.obj'
+        temp_file = f'data/imhd2/hy3d-texgen-simp/{obj}/{obj}_simplified_transformed.obj'
         temp = trimesh.load(temp_file, process=False)
         temp.vertices = temp.vertices - np.mean(temp.vertices, 0)
         out['imhd+' + obj] = temp

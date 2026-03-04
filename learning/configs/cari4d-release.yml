@@ -100,7 +100,7 @@ num_workers: 3
 
 split_file: 'splits/behave+hodome.json'
 exclude_frames: 'splits/behave-30fps-exclude.json'
-render_root: '/home/xianghuix/datasets/foundpose_train/behave-fp-aligned-dmap'
-rgb_root: '/home/xianghuix/datasets/behave/30fps/h5-full-dmap'
-nlf_root: '/home/xianghuix/datasets/behave/nlf-smplh-2unidepth-v2'
-fp_root: '/home/xianghuix/datasets/behave/fp-unidepth-jump-all-aligned-refine'
+render_root: 'outputs/foundpose_train/behave-fp-aligned-dmap'
+rgb_root: 'data/behave/30fps/h5-full-dmap'
+nlf_root: 'data/behave/nlf-smplh-2unidepth-v2'
+fp_root: 'data/behave/fp-unidepth-jump-all-aligned-refine'

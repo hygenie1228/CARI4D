@@ -87,7 +87,7 @@ def cluster_poses(angle_diff, dist_diff, poses_in, symmetry_tfs):
 
 class FoundationPose:
   def __init__(self, model_pts, model_normals, symmetry_tfs=None, mesh=None, scorer:ScorePredictor=None,
-               refiner:PoseRefinePredictor=None, glctx=None, debug=0, debug_dir='/home/bowen/debug/novel_pose_debug/',
+               refiner:PoseRefinePredictor=None, glctx=None, debug=0, debug_dir='outputs/debug/novel_pose_debug',
                cfg=None):
     self.gt_pose = None
     self.ignore_normal_flip = True

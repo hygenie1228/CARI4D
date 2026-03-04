@@ -35,7 +35,7 @@ class ContactPrecompute:
         "load GT and NLF data, together with object shapes, compute contact distances"
         fp_root = args.fp_root
         nlf_root = args.nlf_path
-        packed_root = '/home/xianghuix/datasets/behave/behave-packed'
+        packed_root = 'data/behave/behave-packed'
         outdir = args.outdir
         os.makedirs(outdir, exist_ok=True)
         
@@ -61,8 +61,8 @@ class ContactPrecompute:
                 file_hy3d = get_hy3d_mesh_file(seq)
                 template = trimesh.load(file_hy3d, process=False)
             else:
-                template = load_template(seq.split('_')[2], cent=False, dataset_path='/home/xianghuix/datasets/behave')
-            template_gt = load_template(seq.split('_')[2], cent=False, dataset_path='/home/xianghuix/datasets/behave')
+                template = load_template(seq.split('_')[2], cent=False, dataset_path='data/behave')
+            template_gt = load_template(seq.split('_')[2], cent=False, dataset_path='data/behave')
             center_gt = np.mean(template_gt.vertices, 0)
             template.vertices = template.vertices - center_gt
             template_gt.vertices = template_gt.vertices - center_gt
@@ -83,7 +83,7 @@ class ContactPrecompute:
         packed_file = osp.join(packed_root, f'{seq}_GT-packed.pkl')
         if not osp.isfile(packed_file):
             assert args.wild_video, f'{packed_file} does not exist, must be wild video!'
-            packed_file = f'/home/xianghuix/datasets/behave/behave-packed/Date03_Sub03_chairwood_hand_GT-packed.pkl'
+            packed_file = f'data/behave/behave-packed/Date03_Sub03_chairwood_hand_GT-packed.pkl'
             packed_data = joblib.load(packed_file)
             packed_data_cut = {}
             for k, v in packed_data.items():
@@ -163,9 +163,9 @@ if __name__ == '__main__':
     from argparse import ArgumentParser
     parser = ArgumentParser()
     parser.add_argument('-v', '--video', help='path to a video file')
-    parser.add_argument('-o', '--outdir', help='path to save the results', default='/home/xianghuix/datasets/behave/contact-jts')
-    parser.add_argument('-fp', '--fp_root', help='path to the FP results', default='/home/xianghuix/datasets/behave/fp-unidepth-jump-all-aligned')
-    parser.add_argument('-nlf', '--nlf_path', help='path to the NLF results', default='/home/xianghuix/datasets/behave/nlf-smplh-gender')
+    parser.add_argument('-o', '--outdir', help='path to save the results', default='data/behave/contact-jts')
+    parser.add_argument('-fp', '--fp_root', help='path to the FP results', default='data/behave/fp-unidepth-jump-all-aligned')
+    parser.add_argument('-nlf', '--nlf_path', help='path to the NLF results', default='data/behave/nlf-smplh-gender')
     parser.add_argument('-wild', '--wild_video', help='whether the video is wild video', action='store_true')
     args = parser.parse_args()
     

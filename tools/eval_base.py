@@ -10,7 +10,7 @@
 example commands:
 
 python tools/eval_base.py config=learning/configs/chair-dinov2-abspose.yml exp_name=chair-dinov2-abs6d split_file=splits/date03.json pose_init_type=random-keyframes
-no_wandb=False subtract_transl=True render_root=/home/xianghuix/datasets/foundpose_train/behave-fppose
+no_wandb=False subtract_transl=True render_root=outputs/foundpose_train/behave-fppose
 
 chair-dinov2-abs6d/step000600.pth 8 seqs 11328 examples: rot=3.94294, trans=0.11807
 chair-dinov2-abs6d-norm/step001200.pth 8 seqs 11328 examples: rot=1.01162, trans=0.03347
@@ -179,7 +179,7 @@ class ModelEvaluator:
 
         data_pr_chunk = {k:[] for k in keys}
         seq_name, prev_idx = '', 0
-        res_dir = '/home/xianghuix/datasets/behave/foundpose-input/e2etracker/results'
+        res_dir = 'outputs/behave/foundpose-input/e2etracker/results'
         outfile = f'{res_dir}/{save_name}/{seq_name}.pkl'
         os.makedirs(osp.dirname(outfile), exist_ok=True)
 
@@ -365,7 +365,7 @@ class ModelEvaluator:
 
 
 def eval_hvopnet():
-    'evaluate results from HVOPNet /home/xianghuix/datasets/behave/fp-nlf-hvopnet/'
+    'evaluate results from HVOPNet data/behave/fp-nlf-hvopnet/'
     from scipy.spatial.transform import Rotation
     cfg = get_config()
     evaluator = ModelEvaluator(cfg)
@@ -378,8 +378,8 @@ def eval_hvopnet():
     errors_all = {k: [] for k in err_keys}
     frames = []
     for seq in tqdm(seqs):
-        file_hvopnet = f'/home/xianghuix/datasets/behave/fp-gtsmpl-hvopnet-th0.7/{seq}_params.pkl'
-        file_packed = f'/home/xianghuix/datasets/behave/behave-packed/{seq}_GT-packed.pkl'
+        file_hvopnet = f'data/behave/fp-gtsmpl-hvopnet-th0.7/{seq}_params.pkl'
+        file_packed = f'data/behave/behave-packed/{seq}_GT-packed.pkl'
         data_hvopnet = joblib.load(file_hvopnet)
         data_packed = joblib.load(file_packed)
         L = len(data_packed['frames'])

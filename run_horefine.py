@@ -637,7 +637,7 @@ def main():
         args = Namespace(
             # from fp_behave.py
             video=cfg.video,
-            outpath='/home/xianghuix/datasets/behave/fp',
+            outpath='outputs/fp',
             fps=30,
             tstart=3.0,
             tend=None,
@@ -648,10 +648,10 @@ def main():
             nodepth=False,
 
             # from your provided defaults
-            packed_path='/home/xianghuix/datasets/behave/behave-packed/',
-            dataset_path='/home/xianghuix/datasets/behave/',
-            output_dir='/home/xianghuix/data/foundpose_train/behave',
-            h5_path='/home/xianghuix/data/behave_release/30fps-h5',
+            packed_path='data/behave/behave-packed/',
+            dataset_path='data/behave/',
+            output_dir='outputs/foundpose_train/behave',
+            h5_path='data/behave_release/30fps-h5',
             shard_num=5,
             trans_normalizer=[0.02, 0.02, 0.05],
             rot_normalizer=20.0,

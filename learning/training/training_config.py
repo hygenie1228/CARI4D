@@ -199,10 +199,10 @@ class ContactOptimConfig:
     use_gt: bool = False # use GT contacts or not 
 
     # data paths
-    video_root: str = '/home/xianghuix/datasets/behave/videos-demo'
-    masks_root: str = '/home/xianghuix/datasets/behave/masks-h5-my'
-    packed_root: str = '/home/xianghuix/datasets/behave/behave-packed'
-    hy3d_meshes_root: str = '/home/xianghuix/datasets/behave/selected-views/hy3d-aligned-center'
+    video_root: str = 'data/behave/videos-demo'
+    masks_root: str = 'data/behave/masks-h5-my'
+    packed_root: str = 'data/behave/behave-packed'
+    hy3d_meshes_root: str = 'data/behave/selected-views/hy3d-aligned-center'
     index: Optional[int] = None # index of the video to use
 
 @dataclass
@@ -240,11 +240,11 @@ class TrainTemporalRefinerConfig:
     render_files: Optional[str] = 'xxx'  # path to pre-rendered images
 
     split_file: Optional[str] = 'splits/behave-chairs.json'  # contains train, and val list
-    render_root: Optional[str] = '/home/xianghuix/datasets/foundpose_train/behave-h5' # root to all renderings
-    rgb_root: Optional[str] = '/home/xianghuix/datasets/behave/30fps/h5-resized' # root to all rgb files
-    packed_root: Optional[str] = '/home/xianghuix/datasets/behave/behave-packed'  # root to packed files
-    fp_root: Optional[str] = '/home/xianghuix/datasets/behave/fp' # root to fp files
-    contacts_root: Optional[str] = '/home/xianghuix/datasets/behave/contact-jts' # root to contact files
+    render_root: Optional[str] = 'outputs/foundpose_train/behave-h5' # root to all renderings
+    rgb_root: Optional[str] = 'data/behave/30fps/h5-resized' # root to all rgb files
+    packed_root: Optional[str] = 'data/behave/behave-packed'  # root to packed files
+    fp_root: Optional[str] = 'data/behave/fp' # root to fp files
+    contacts_root: Optional[str] = 'data/behave/contact-jts' # root to contact files
     clip_len: int = 96 # temporal length of one clip, 96 & bs=8 maximizes the GPU memory usage
     window: int = 10 # distance between two clip start point
     data_name: str = 'video-data'
@@ -446,10 +446,10 @@ class TrainTemporalRefinerConfig:
     cam_id: int = 1
     refine_iters: int = 1
     wild_video: bool = False
-    masks_root: str = '/home/xianghuix/datasets/behave/masks-h5-my'
-    hy3d_meshes_root: str = '/home/xianghuix/datasets/cari4d-demo/behave/meshes'
-    fp_root: str = '/home/xianghuix/datasets/behave/fp'
-    outpath: str = '/home/xianghuix/datasets/behave/foundpose-input/e2etracker/results'
+    masks_root: str = 'data/behave/masks-h5-my'
+    hy3d_meshes_root: str = 'data/cari4d-demo/behave/meshes'
+    fp_root: str = 'data/behave/fp'
+    outpath: str = 'outputs/behave/foundpose-input/e2etracker/results'
 
     prev_pred_root: Optional[str] = None # path to previous predicted results, for motion diffusion 
     viz_input: bool = False

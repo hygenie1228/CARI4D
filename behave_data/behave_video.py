@@ -16,6 +16,7 @@ import os.path as osp
 from typing import Any
 import numpy as np
 import imageio
+import cv2
 from .utils import availabe_kindata
 from .video_reader import VideoController, ColorDepthController
 
@@ -103,7 +104,9 @@ class BaseBehaveVideoData(object):
         input_color = args.video
         video_prefix = osp.basename(input_color).split('.')[0]
         output_h5_path = osp.join(args.outpath, video_prefix + f'_all.pkl')
-        os.makedirs(osp.dirname(output_h5_path), exist_ok=True)
+        out_dir = osp.dirname(output_h5_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         self.output_path = output_h5_path
 
         kids, comb = availabe_kindata(input_color, kinect_count=4 if args.data_source != 'intercap' else 6)
@@ -200,9 +203,17 @@ class BaseBehaveVideoData(object):
             camera_K = np.array([[fx, 0, cx],
                                  [0, fy, cy],
                                  [0, 0, 1]]).astype(np.float32)
-            # get the image size info
-            img = imageio.get_reader(self.args.video).get_data(0)
-            self.image_size = img.shape[:2]
+            # get the image size info (imageio can report 0 frames for some codecs; fallback to cv2)
+            try:
+                img = imageio.get_reader(self.args.video).get_data(0)
+                self.image_size = img.shape[:2]
+            except (IndexError, TypeError):
+                cap = cv2.VideoCapture(self.args.video)
+                ret, img = cap.read()
+                cap.release()
+                if not ret or img is None:
+                    raise ValueError(f'Could not read first frame from video: {self.args.video}')
+                self.image_size = img.shape[:2]
         return camera_K
 
     def load_color_depth(self, enum_idx, kids, t):
@@ -226,8 +237,8 @@ class BaseBehaveVideoData(object):
 
         # common setup for all video input processes
         parser.add_argument('-v', '--video', help='path to a video file')
-        parser.add_argument('-o', '--outpath', default='/home/xianghuix/datasets/behave/fp')
-        parser.add_argument('--masks_root', default='/home/xianghuix/datasets/behave/masks-h5-my')
+        parser.add_argument('-o', '--outpath', default='outputs/fp')
+        parser.add_argument('--masks_root', default='data/behave/masks-h5-my')
         parser.add_argument('-fps', type=int, default=30, help='generate frames at which fps')
         parser.add_argument('-tstart', type=float, default=3.0, help='first frame time')
         parser.add_argument('-tend', type=float, default=None, help='last frame time')
@@ -250,10 +261,10 @@ class BaseBehaveVideoData(object):
         parser.add_argument('--chunk_end', default=None, type=int)
 
         # additional data path
-        parser.add_argument('--nlf_path', default='/home/xianghuix/datasets/behave/nlf-smplh-genmo-incam-z/', type=str)
+        parser.add_argument('--nlf_path', default='data/behave/nlf-smplh-genmo-incam-z/', type=str)
 
         # additional path for hy3d
-        parser.add_argument('--hy3d_root', default='/home/xianghuix/datasets/behave/selected-views/hy3d-aligned', type=str)
+        parser.add_argument('--hy3d_root', default='data/behave/selected-views/hy3d-aligned', type=str)
 
 
         return parser

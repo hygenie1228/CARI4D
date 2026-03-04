@@ -624,7 +624,7 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
     def load_gt_data(self, kids):
         if not self.args.wild_video:
             packed_data = joblib.load(
-                f'/home/xianghuix/datasets/behave/behave-packed/{self.video_prefix}_GT-packed.pkl')
+                f'data/behave/behave-packed/{self.video_prefix}_GT-packed.pkl')
             frames_packed = packed_data['frames']
             gt_poses = np.eye(4)[None].repeat(len(frames_packed), 0)
             gt_poses[:, :3, :3] = R.from_rotvec(packed_data['obj_angles']).as_matrix()
@@ -632,7 +632,7 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
             if self.args.data_source in ['behave', 'procigen']:
                 from behave_data.utils import load_kinect_poses_back
                 w2c_rots, w2c_trans = load_kinect_poses_back(
-                    osp.join('/home/xianghuix/datasets/behave', 'calibs', self.video_prefix.split('_')[0], 'config'),
+                    osp.join('data/behave', 'calibs', self.video_prefix.split('_')[0], 'config'),
                     kids)
             elif self.args.data_source in ['hodome', 'intercap', 'imhd']:
                 extrinsics = packed_data['extrinsics']  # (K, 4, 4)

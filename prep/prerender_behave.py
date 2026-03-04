@@ -138,7 +138,7 @@ class BehaveRenderer:
         controllers, _ = init_video_controllers(args, args.video, kids)
 
         # read h5 file
-        h5_path = f'/home/xianghuix/datasets/behave/masks-h5-my/{video_prefix}_masks_k1.h5'
+        h5_path = f'data/behave/masks-h5-my/{video_prefix}_masks_k1.h5'
         print(f'loading masks from {h5_path}')
         h5_paths = [h5_path.replace('_k1.h5', f'_k{x}.h5') for x in range(len(controllers))]
         tar_mask = [h5py.File(h5_path, 'r') for h5_path in h5_paths]
@@ -232,7 +232,7 @@ class BehaveRenderer:
         obj_name = seq_name.split('_')[2]
         if args.wild_video:
             # load from hy3d 
-            files = sorted(glob.glob(f'/home/xianghuix/datasets/behave/selected-views/hy3d-aligned/{seq_name}*/*{obj_name}*_align.obj'))
+            files = sorted(glob.glob(f'data/behave/selected-views/hy3d-aligned/{seq_name}*/*{obj_name}*_align.obj'))
             if len(files) == 0:
                 raise ValueError(f'no aligned hy3d template found for {seq_name}')
             temp_orig = trimesh.load(files[0], process=False)
@@ -245,18 +245,18 @@ class BehaveRenderer:
             elif args.data_source == 'intercap':
                 # for intercap, the center is still from the original dataset, to be consistent with FP! 
                 # load from HY3D 
-                file = f'/home/xianghuix/datasets/InterCap/objects/{obj_name[3:]}.ply'
+                file = f'data/intercap/objects/{obj_name[3:]}.ply'
                 temp_orig = trimesh.load(file, process=False)
                 temp_simplified = temp_orig.copy()
             elif args.data_source == 'hodome':
                 # use the one that is used to compute center 
                 obj_name = seq_name.split('_')[2]
-                temp_orig = trimesh.load(f'/home/xianghuix/datasets/HODome/obj-newtex/{obj_name}/{obj_name}.obj', process=False)
+                temp_orig = trimesh.load(f'data/hodome/obj-newtex/{obj_name}/{obj_name}.obj', process=False)
                 temp_simplified = temp_orig.copy()
             elif args.data_source == 'imhd':
                 # load from simplified 
                 obj_name = seq_name.split('_')[2]
-                mesh_file = f'/home/xianghuix/datasets/IMHD2/hy3d-texgen-simp/{obj_name}/{obj_name}_simplified_transformed.obj'
+                mesh_file = f'data/imhd2/hy3d-texgen-simp/{obj_name}/{obj_name}_simplified_transformed.obj'
                 temp_simplified = trimesh.load(mesh_file, process=False)
                 temp_orig = temp_simplified.copy()
             elif args.data_source == 'procigen':
@@ -325,10 +325,10 @@ class BehaveRenderer:
         from argparse import ArgumentParser
         parser = ArgumentParser()
         parser.add_argument('-v', '--video', help='path to a video file')
-        parser.add_argument('--packed_path', type=str, default='/home/xianghuix/datasets/behave/behave-packed/')
-        parser.add_argument('-d', '--dataset_path', type=str, default='/home/xianghuix/datasets/behave/')
-        parser.add_argument('-o', '--output_dir', type=str, default='/home/xianghuix/data/foundpose_train/behave')
-        parser.add_argument('--h5_path', type=str, default='/home/xianghuix/data/behave_release/30fps-h5')
+        parser.add_argument('--packed_path', type=str, default='data/behave/behave-packed/')
+        parser.add_argument('-d', '--dataset_path', type=str, default='data/behave/')
+        parser.add_argument('-o', '--output_dir', type=str, default='outputs/foundpose_train/behave')
+        parser.add_argument('--h5_path', type=str, default='data/behave_release/30fps-h5')
         parser.add_argument('-sn', '--shard_num', type=int, default=5, help='shard how many examples into one file')
         parser.add_argument('-nodepth', default=False, action='store_true',
                             help='save depth images or not, if not, will not load depth video')
@@ -347,8 +347,8 @@ class BehaveRenderer:
 
         parser.add_argument('--add_rgb', default=False, action='store_true')
 
-        parser.add_argument('--nlf_path', default='/home/xianghuix/datasets/behave/nlf/', )
-        parser.add_argument('--fp_root', default='/home/xianghuix/datasets/behave/fp')
+        parser.add_argument('--nlf_path', default='data/behave/nlf/', )
+        parser.add_argument('--fp_root', default='data/behave/fp')
 
         parser.add_argument('--debug', default=False, action='store_true')
         parser.add_argument('--wild_video', default=False, action='store_true')

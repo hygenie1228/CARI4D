@@ -100,7 +100,7 @@ set_logging_format()
 
 
 def load_smpl_obj_uvmap(video_prefix, use_hy3d=False, seq_name=None, human_texture='part', hum_only=False, 
-        meshes_root='/home/xianghuix/datasets/behave/selected-views/hy3d-aligned-center'):
+        meshes_root='data/behave/selected-views/hy3d-aligned-center'):
   from pytorch3d.structures import join_meshes_as_scene
   from pytorch3d.renderer import TexturesUV
   from pytorch3d.io import load_objs_as_meshes

@@ -11,7 +11,7 @@ visualize predictions
 
 to render IMHD videos:
 
-python tools/viz_pred.py -pf outputs/results/HORefine-Jloss-filter-unidepth-allobj-symm-abs+step024978_abs-hy3d3-icapk0-unnorm/ICapS02_sub09_obj01_Seg_0.pth --data_source intercap --video /home/xianghuix/datasets/behave/unidepth/ICapS02_sub09_obj01_Seg_0.0.color.mp4
+python tools/viz_pred.py -pf outputs/results/HORefine-Jloss-filter-unidepth-allobj-symm-abs+step024978_abs-hy3d3-icapk0-unnorm/ICapS02_sub09_obj01_Seg_0.pth --data_source intercap --video data/behave/unidepth/ICapS02_sub09_obj01_Seg_0.0.color.mp4
 
 """
 import glob
@@ -58,7 +58,7 @@ class PredVisualizer(FPBehaveVideoProcessor):
         parser.add_argument('-pf', '--pred_file')
         parser.add_argument('--chunk_size', type=int, default=600)
         parser.add_argument('--out_root', type=str,
-                            default='/home/xianghuix/datasets/behave/foundpose-input/e2etracker/viz')
+                            default='outputs/behave/foundpose-input/e2etracker/viz')
         parser.add_argument('-ef', '--error_file', type=str, default=None )
         parser.add_argument('--use_sel_view', action='store_true')
         parser.add_argument('--no_sphere', action='store_true')
@@ -83,7 +83,7 @@ class PredVisualizer(FPBehaveVideoProcessor):
         pred_file=None,
         chunk_size=600,
         wild_video=False,
-        out_root='/home/xianghuix/datasets/behave/foundpose-input/e2etracker/viz',
+        out_root='outputs/behave/foundpose-input/e2etracker/viz',
         use_sel_view=False,
         no_sphere=False,
         data_source='behave',
@@ -91,7 +91,7 @@ class PredVisualizer(FPBehaveVideoProcessor):
     )
 
     def get_video_path(self, seq):
-        return f'/home/xianghuix/datasets/behave/videos/{seq}.{self.args.kid}.color.mp4'
+        return f'data/behave/videos/{seq}.{self.args.kid}.color.mp4'
 
     def get_chunk_num(self):
         return 5000000
@@ -138,7 +138,7 @@ class PredVisualizer(FPBehaveVideoProcessor):
                 # center object vertices using simplified template center (dataset convention)
                 from behave_data.utils import load_template as load_template_simple
                 try:
-                    simp = load_template_simple(obj_name, cent=False, dataset_path='/home/xianghuix/datasets/behave')
+                    simp = load_template_simple(obj_name, cent=False, dataset_path='data/behave')
                 except Exception as e:
                     print(f'Error loading template {obj_name}: {e}')
                     from behave_data.const import get_hy3d_mesh_file
@@ -160,12 +160,12 @@ class PredVisualizer(FPBehaveVideoProcessor):
                     if mesh_file is None:
                         return None
                 else:
-                    mesh_file = f'/home/xianghuix/datasets/behave/objects/{obj_name}/{obj_name}.obj'
+                    mesh_file = f'data/behave/objects/{obj_name}/{obj_name}.obj'
                 mesh = trimesh.load(mesh_file, process=False)
                 mesh_tensors = Utils.make_mesh_tensors(mesh)
                 obj_base = mesh_tensors['pos']
                 from behave_data.utils import load_template as load_template_simple
-                simp = load_template_simple(obj_name, cent=False, dataset_path='/home/xianghuix/datasets/behave')
+                simp = load_template_simple(obj_name, cent=False, dataset_path='data/behave')
                 cent_np = np.mean(simp.vertices, axis=0)
                 cent = torch.as_tensor(cent_np, device='cuda', dtype=torch.float)
                 obj_base = obj_base - cent
@@ -248,13 +248,13 @@ class PredVisualizer(FPBehaveVideoProcessor):
             kid = 1 if args.data_source == 'behave' and not args.wild_video else 0 # TODO: check this 
             
         kid = 1 if args.data_source == 'intercap' else kid 
-        video_path = args.video if args.video is not None else f'/home/xianghuix/datasets/behave/videos/{seq}.{kid}.color.mp4'
+        video_path = args.video if args.video is not None else f'data/behave/videos/{seq}.{kid}.color.mp4'
         if '2023'  in seq:
             kid = 0 
-            video_path = f'/home/xianghuix/datasets/IMHD2/videos-behave/{seq}.{kid}.color.mp4'
+            video_path = f'data/imhd2/videos-behave/{seq}.{kid}.color.mp4'
         print(f'Using kid: {kid}, video path: {video_path}')
         # NLF SMPL params (poses, betas, transls) for selected Kinect
-        nlf_file = f'/home/xianghuix/datasets/behave/nlf/{seq}_params.pkl'
+        nlf_file = f'data/behave/nlf/{seq}_params.pkl'
         has_nlf = osp.isfile(nlf_file)
         if has_nlf:
             nlf_data = joblib.load(nlf_file)
@@ -269,7 +269,7 @@ class PredVisualizer(FPBehaveVideoProcessor):
             time_to_nlf, thetas_all, betas_all, transls_all, betas_avg_all = {}, None, None, None, None
 
         # FoundationPose object poses (camera coordinates) per Kinect
-        fp_file = f'/home/xianghuix/datasets//behave/fp-hy3d2-unidepth/{seq}_all.pkl'
+        fp_file = f'data/behave/fp-hy3d2-unidepth/{seq}_all.pkl'
         has_fp = osp.isfile(fp_file)
         if has_fp:
             fp_data = joblib.load(fp_file)
@@ -439,7 +439,7 @@ class PredVisualizer(FPBehaveVideoProcessor):
         cs = int(getattr(args, 'chunk_size', 300))
         N = len(inds_all)
         # add contact text
-        packed_file = f'/home/xianghuix/datasets/behave/behave-packed/{seq}_GT-packed.pkl'
+        packed_file = f'data/behave/behave-packed/{seq}_GT-packed.pkl'
         if osp.isfile(packed_file):
             packed_data = joblib.load(packed_file)
             dists_h2o_gt = packed_data['dists_h2o'][0]

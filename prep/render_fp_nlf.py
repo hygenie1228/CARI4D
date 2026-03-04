@@ -60,7 +60,7 @@ class BehaveFPNLFRenderer(BehaveRenderer):
             w2c_rots, w2c_trans = load_kinect_poses_back(
                 osp.join(args.dataset_path, 'calibs', video_prefix.split('_')[0], 'config'), kids)
         elif args.data_source in ['intercap', 'hodome', 'imhd']:
-            gt_packed = joblib.load(f'/home/xianghuix/datasets/behave/behave-packed/{video_prefix}_GT-packed.pkl')
+            gt_packed = joblib.load(f'data/behave/behave-packed/{video_prefix}_GT-packed.pkl')
             w2c_rots, w2c_trans = gt_packed['extrinsics'][:, :3, :3], gt_packed['extrinsics'][:, :3, 3]
 
         K_all = [get_intrinsics_unified(args.data_source, video_prefix, kid, args.wild_video) for kid in kids]

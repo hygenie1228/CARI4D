@@ -167,7 +167,7 @@ class FPBehaveVideoProcessor(BaseBehaveVideoData):
             print("Not loading any behave template!")
         elif self.args.data_source == 'hodome':
             obj_name = self.video_prefix.split('_')[2]
-            mesh_file = f'/home/xianghuix/datasets/HODome/obj-newtex/{obj_name}/{obj_name}.obj'
+            mesh_file = f'data/hodome/obj-newtex/{obj_name}/{obj_name}.obj'
             print('Using template mesh from {}'.format(mesh_file))
             mesh = trimesh.load(mesh_file, process=False)
             # center by mean of vertices
@@ -175,7 +175,7 @@ class FPBehaveVideoProcessor(BaseBehaveVideoData):
             mesh.vertices = mesh.vertices - center
         elif self.args.data_source == 'imhd':
             obj_name = self.video_prefix.split('_')[2]
-            mesh_file = f'/home/xianghuix/datasets/IMHD2/hy3d-texgen-simp/{obj_name}/{obj_name}_simplified_transformed.obj'
+            mesh_file = f'data/imhd2/hy3d-texgen-simp/{obj_name}/{obj_name}_simplified_transformed.obj'
             print('Using template mesh from {}'.format(mesh_file))
             mesh = trimesh.load(mesh_file, process=False)
             # center by mean of vertices
@@ -185,7 +185,7 @@ class FPBehaveVideoProcessor(BaseBehaveVideoData):
         elif self.args.data_source == 'intercap':
             # get from HY3D
             obj_name = self.video_prefix.split('_')[2]
-            files = sorted(glob(f'/home/xianghuix/datasets/behave/selected-views/hy3d-aligned/{self.video_prefix}*/*{obj_name}*_align.obj'))
+            files = sorted(glob(f'data/behave/selected-views/hy3d-aligned/{self.video_prefix}*/*{obj_name}*_align.obj'))
             if len(files) == 0:
                 print(f'no aligned hy3d template found for {self.video_prefix}, existing...')
                 return
@@ -201,7 +201,7 @@ class FPBehaveVideoProcessor(BaseBehaveVideoData):
         elif self.args.data_source == 'procigen':
             # get the template mesh from ShapeNet, rescale
             from behave_data.const import shapenet_root
-            packed_file = f'/home/xianghuix/datasets/behave/behave-packed/{self.video_prefix}_GT-packed.pkl'
+            packed_file = f'data/behave/behave-packed/{self.video_prefix}_GT-packed.pkl'
             packed_data = joblib.load(packed_file)
             # load objaverse uids and check if it is objaverse
             objav_uids = json.load(open('splits/objaverse_ids.json', 'r'))
@@ -264,9 +264,9 @@ class FPBehaveVideoProcessor(BaseBehaveVideoData):
 
     def get_template_file(self):
         obj_name = self.video_prefix.split('_')[2]
-        mesh_file = f'/home/xianghuix/datasets/behave/objects/{obj_name}/{obj_name}.obj'
+        mesh_file = f'data/behave/objects/{obj_name}/{obj_name}.obj'
         if self.args.wild_video:
-            files = sorted(glob(f'/home/xianghuix/datasets/behave/hy3d/manual-icp-out-miny-nocent/{obj_name}/*{obj_name}*_rgba.obj'))
+            files = sorted(glob(f'data/behave/hy3d/manual-icp-out-miny-nocent/{obj_name}/*{obj_name}*_rgba.obj'))
             mesh_file = files[0]
         print('using object template:', mesh_file)
         return mesh_file

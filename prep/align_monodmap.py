@@ -83,10 +83,17 @@ class MonodepthAligner(BaseBehaveVideoData):
 
             outfile = osp.join(outdir, f'{self.video_prefix}.{k}.depth-reg.mp4')
             # add synlink for color file
-            os.symlink(f'../{method_name}/{self.video_prefix}.{k}.color.mp4', outfile.replace('.depth-reg.mp4', '.color.mp4'))
+            try:
+                os.symlink(f'../{method_name}/{self.video_prefix}.{k}.color.mp4', outfile.replace('.depth-reg.mp4', '.color.mp4'))
+            except FileExistsError:
+                pass
+
             if osp.isfile(f'{video_root}/{self.video_prefix}.{k}.color.pkl'):
                 # the pkl for in the wild videos where intrinsics are estimated.
-                os.symlink(f'../{method_name}/{self.video_prefix}.{k}.color.pkl', outfile.replace('.depth-reg.mp4', '.color.pkl'))
+                try:
+                    os.symlink(f'../{method_name}/{self.video_prefix}.{k}.color.pkl', outfile.replace('.depth-reg.mp4', '.color.pkl'))
+                except FileExistsError:
+                    pass
 
             depth_writer = None 
             if viz_res:

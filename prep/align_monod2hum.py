@@ -73,7 +73,14 @@ class Monodepth2HumanAligner(MonodepthAligner):
         mesh_tensors, meshes = Utils.load_smpl_obj_uvmap(self.video_prefix, use_hy3d=True, hum_only=True)
         self.glctx = dr.RasterizeCudaContext()
 
-        video_length = VideoReader(args.video).video_params['length']
+        video_length = VideoReader(args.video).video_params.get('length')
+        if video_length is None:
+            cap = cv2.VideoCapture(args.video)
+            video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            if video_length <= 0:
+                raise ValueError(f'Could not get frame count for {args.video}')
+
         assert args.wild_video, 'can only process wild video'
         img1st = imageio.get_reader(args.video).get_data(0)
         render_size = img1st.shape[:2]  # h, w
@@ -175,37 +182,46 @@ def child_run(args, kid_to_run):
 
 if __name__ == '__main__':
     args = MonodepthAligner.get_parser().parse_args()
-    import multiprocessing as mp
-    import time
-    from copy import deepcopy
 
-    mp.set_start_method('spawn', force=True)
-    ctx = mp.get_context('spawn')
-
-    if osp.isfile(args.video):
-        videos = [args.video]
+    if os.environ.get('DEBUG_ALIGN'):
+        # Debug mode: run a single video in main process so pdb works
+        videos = [args.video] if osp.isfile(args.video) else sorted(glob.glob(args.video))[:1]
+        args.video = videos[0]
+        print(f'DEBUG_ALIGN: running single video in main process: {args.video}')
+        child_run(args, 0)
+        print('all done')
     else:
-        videos = sorted(glob.glob(args.video))
+        import multiprocessing as mp
+        import time
+        from copy import deepcopy
 
-    chunk_size = len(videos) // 8 + 1
-    if args.index is not None:
-        videos = videos[args.index * chunk_size:(args.index + 1) * chunk_size]
-    max_procs_per_gpu = 2
-    procs = []
-    print(f'running {len(videos)} videos, first video: {videos[0]}, last video: {videos[-1]}')
-    args_orig = args
-    kids = [0, 1, 2, 3] if args.data_source != 'intercap' else [0, 1, 2, 3, 4, 5]
-    if args.wild_video:
-        kids = [0]
-    for i in range(len(videos)):
-        args = deepcopy(args_orig)
-        args.video = videos[i]
-        for k in kids:
-            # check if the
-            proc = ctx.Process(target=child_run, args=(args, k))
-            proc.start()
-            time.sleep(2) # to avoid race condition
-            procs.append(proc)
-        for p in procs:
-            p.join()
-    print('all done')
+        mp.set_start_method('spawn', force=True)
+        ctx = mp.get_context('spawn')
+
+        if osp.isfile(args.video):
+            videos = [args.video]
+        else:
+            videos = sorted(glob.glob(args.video))
+
+        chunk_size = len(videos) // 8 + 1
+        if args.index is not None:
+            videos = videos[args.index * chunk_size:(args.index + 1) * chunk_size]
+        max_procs_per_gpu = 2
+        procs = []
+        print(f'running {len(videos)} videos, first video: {videos[0]}, last video: {videos[-1]}')
+        args_orig = args
+        kids = [0, 1, 2, 3] if args.data_source != 'intercap' else [0, 1, 2, 3, 4, 5]
+        if args.wild_video:
+            kids = [0]
+        for i in range(len(videos)):
+            args = deepcopy(args_orig)
+            args.video = videos[i]
+            for k in kids:
+                # check if the
+                proc = ctx.Process(target=child_run, args=(args, k))
+                proc.start()
+                time.sleep(2) # to avoid race condition
+                procs.append(proc)
+            for p in procs:
+                p.join()
+        print('all done')

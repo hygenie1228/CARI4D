@@ -78,7 +78,7 @@ class NLF2Unidepth(BaseBehaveVideoData):
         print(f'Sequence {self.video_prefix} First frame: {first_frame}, original first frame: {self.times[0]}, after cut: {times_cut[0]}, packed data first frame: {nlf_data["frames"][0]}')
         if len(times_cut) != len(nlf_verts_all):
             if len(times_cut) < len(nlf_verts_all):
-                gt_data = joblib.load(f'/home/xianghuix/datasets/behave/behave-packed/{self.video_prefix}_GT-packed.pkl')
+                gt_data = joblib.load(f'data/behave/behave-packed/{self.video_prefix}_GT-packed.pkl')
                 frames_gt = gt_data['frames']
                 times_cut = [self.time_str_to_float(t) for t in frames_gt]
             else:

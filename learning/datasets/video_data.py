@@ -231,7 +231,7 @@ class VideoDataset(Dataset):
 
         # For debug, pre-load object templates
         from behave_data.utils import load_templates_all
-        templates_all = load_templates_all('/home/xianghuix/datasets/behave', orig=False) if not cfg.wild_video else {} 
+        templates_all = load_templates_all('data/behave', orig=False) if not cfg.wild_video else {} 
         templates_meta = {}
         for k, mesh in templates_all.items():
             to_origin, extents = trimesh.bounds.oriented_bounds(mesh)

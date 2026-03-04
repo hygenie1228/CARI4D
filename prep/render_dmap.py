@@ -35,7 +35,7 @@ class DMapRenderer(FPFilterTwoDirProcessor):
         dist_key = 'dists_h2o'
         
         # load packed GT data 
-        packed_file = f'/home/xianghuix/datasets/behave/behave-packed/{self.video_prefix}_GT-packed.pkl'
+        packed_file = f'data/behave/behave-packed/{self.video_prefix}_GT-packed.pkl'
         if osp.isfile(packed_file):
             packed_data = joblib.load(packed_file)
         else:

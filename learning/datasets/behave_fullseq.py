@@ -63,7 +63,7 @@ class BehaveFullSeqTestDataset(Dataset):
             if contacts_root is not None:
                 contact_files.append(f'{contacts_root}/{seq}_contact-jts.npz')
         # load camera transforms
-        self.w2cs = joblib.load('/home/xianghuix/datasets/behave/calibs/w2cs_all.pkl')
+        self.w2cs = joblib.load('data/behave/calibs/w2cs_all.pkl')
         # decide which kinect to be used for each view 
         if isinstance(test_kids, int):
             self.kinect_inds = [1]*len(nlf_files)

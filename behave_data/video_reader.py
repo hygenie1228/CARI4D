@@ -9,6 +9,7 @@ import imageio
 import numpy as np
 import json
 import os.path as osp
+import cv2
 
 
 class VideoController:
@@ -53,7 +54,13 @@ class VideoController:
         else:
             # wild video
             assert not self.pre_load
-            L = self.reader.video_params['length']
+            L = self.reader.video_params.get('length')
+            if L is None:
+                cap = cv2.VideoCapture(self.video_path)
+                L = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap.release()
+                if L <= 0:
+                    raise ValueError(f'Could not get frame count for {self.video_path}')
             self.frame_times = np.arange(0, L)
             print('Warning: no time files found, using frame index instead, total video length: {}'.format(L))
 
