@@ -14,11 +14,14 @@ Expected layout under --exp_dir:
 Extra assets you must have outside exp_dir:
   SMPL-H pickles under --smplh_root (default: <repo>/data/smpl/smplh), e.g. SMPLH_male.pkl
 
-Project imports are limited to prep.align_utils (CPU depth filters) and tools.icp_utils (ICP).
+Project imports are limited to exp.align_utils for depth filtering and ICP.
 Aligned parameters are written to human/human_params_aligned.npz with the same keys
 and array layout as human/human_params.npz (subset of frames if --start/--end is used).
 
 Run from the repository root so paths resolve.
+
+# Example (do not remove)
+python exp/align_human2depth.py --exp_dir /home/namhj/CARI4D/exp/behave_debug/Date03_Sub03_chairblack_lift_3 --debug_32 --redo
 """
 
 from __future__ import annotations
@@ -34,14 +37,21 @@ import open3d as o3d
 import torch
 import trimesh
 from tqdm import tqdm
+try:
+    from videoio import Uint16Reader
+except ImportError:
+    Uint16Reader = None
 
 _REPO_ROOT = osp.dirname(osp.dirname(osp.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from prep.align_utils import bilateral_filter_depth_cpu_fast, erode_depth_cpu_fast
+from exp.align_utils import (
+    bilateral_filter_depth_cpu_fast,
+    erode_depth_cpu_fast,
+    translation_only_icp_torch,
+)
 from smplfitter.pt import BodyFitter, BodyModel
-from tools import icp_utils
 
 
 def depth2xyzmap(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
@@ -169,21 +179,58 @@ def align_sequence(
     center_pts: list[np.ndarray] = []
     center_verts: list[np.ndarray] = []
 
-    cap_d = cv2.VideoCapture(depth_mp4)
-    cap_m = cv2.VideoCapture(mask_mp4)
+    # Prefer Uint16Reader for BEHAVE depth-reg style videos. This avoids
+    # mis-decoding when OpenCV color-converts compressed depth bytes.
+    use_uint16_reader = False
+    depth_reader = None
+    depth_it = None
+    cap_d = None
+    if Uint16Reader is not None:
+        try:
+            depth_reader = Uint16Reader(depth_mp4)
+            depth_it = iter(depth_reader)
+            use_uint16_reader = True
+            print("depth reader: Uint16Reader")
+        except Exception:
+            depth_reader = None
+            use_uint16_reader = False
+    if not use_uint16_reader:
+        cap_d = cv2.VideoCapture(depth_mp4)
+        print("depth reader: OpenCV BGR unpack fallback")
 
+    cap_m = cv2.VideoCapture(mask_mp4)
     if frame_start > 0:
-        cap_d.set(cv2.CAP_PROP_POS_FRAMES, frame_start)
+        if use_uint16_reader:
+            for _ in range(frame_start):
+                try:
+                        _ = next(depth_it)
+                except StopIteration as exc:
+                    raise RuntimeError(
+                        f"Failed to seek depth reader to frame {frame_start}"
+                    ) from exc
+        else:
+            cap_d.set(cv2.CAP_PROP_POS_FRAMES, frame_start)
         cap_m.set(cv2.CAP_PROP_POS_FRAMES, frame_start)
 
     iterator = range(start, end)
     for fi in tqdm(iterator, desc="align frames"):
-        ret_d, d_bgr = cap_d.read()
+        if use_uint16_reader:
+            try:
+                d_u16 = next(depth_it)
+                ret_d = True
+            except StopIteration:
+                ret_d = False
+                d_u16 = None
+        else:
+            ret_d, d_bgr = cap_d.read()
         ret_m, m_bgr = cap_m.read()
         if not ret_d or not ret_m:
             raise RuntimeError(f"Failed to read frame {fi} from depth/mask videos")
 
-        depth = bgr_frame_to_depth_meters(d_bgr)
+        if use_uint16_reader:
+            depth = d_u16.astype(np.float32) / 1000.0
+        else:
+            depth = bgr_frame_to_depth_meters(d_bgr)
         mask_h = (cv2.cvtColor(m_bgr, cv2.COLOR_BGR2GRAY) > 127).astype(np.uint8) * 255
 
         h, w = depth.shape[:2]
@@ -220,7 +267,7 @@ def align_sequence(
 
         src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts_nlf))
         tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts_hum))
-        mat_icp = icp_utils.translation_only_icp_torch(
+        mat_icp = translation_only_icp_torch(
             src, tgt, voxel_size=0.01, max_iters=[25, 10, 5]
         )
         mat = np.matmul(mat_icp, mat)
@@ -237,7 +284,7 @@ def align_sequence(
                 np.matmul(pts_nlf_sample, mat_scale[:3, :3].T) + mat_scale[:3, 3]
             )
         )
-        mat_icp2 = icp_utils.translation_only_icp_torch(src, tgt, voxel_size=0.01)
+        mat_icp2 = translation_only_icp_torch(src, tgt, voxel_size=0.01)
         mat = np.matmul(mat_icp2, mat_scale)
         verts_nlf_align = np.matmul(verts_nlf, mat[:3, :3].T) + mat[:3, 3]
 
@@ -254,7 +301,10 @@ def align_sequence(
         center_pts.append(np.mean(pts_hum, axis=0).astype(np.float32))
         center_verts.append(np.mean(verts_nlf, axis=0).astype(np.float32))
 
-    cap_d.release()
+    if use_uint16_reader:
+        depth_reader.close()
+    else:
+        cap_d.release()
     cap_m.release()
 
     verts_stack = np.stack(verts_aligned, 0)
@@ -308,6 +358,11 @@ def main():
     parser.add_argument("--redo", action="store_true")
     parser.add_argument("--start", type=int, default=0, help="First frame index (inclusive)")
     parser.add_argument("--end", type=int, default=-1, help="Last frame exclusive; -1 = all")
+    parser.add_argument(
+        "--debug_32",
+        action="store_true",
+        help="Quick debug mode: run only the first 32 frames (equivalent to --start 0 --end 32)",
+    )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
         "--vert_z_min",
@@ -321,13 +376,19 @@ def main():
     if out is None:
         out = osp.join(osp.abspath(args.exp_dir), "human", "human_params_aligned.npz")
 
+    start = args.start
+    end = None if args.end < 0 else args.end
+    if args.debug_32:
+        start, end = 0, 32
+        print("debug mode enabled: using first 32 frames (start=0, end=32)")
+
     align_sequence(
         exp_dir=args.exp_dir,
         smplh_root=osp.abspath(args.smplh_root),
         out_npz=osp.abspath(out),
         redo=args.redo,
-        frame_start=args.start,
-        frame_end=None if args.end < 0 else args.end,
+        frame_start=start,
+        frame_end=end,
         device=args.device,
         vert_z_min=args.vert_z_min,
     )

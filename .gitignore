@@ -5,3 +5,5 @@ weights/
 experiments/
 unidepth/
 output/
+exp/codec_test2
+exp/mesh_debug
