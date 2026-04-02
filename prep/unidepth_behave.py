@@ -27,6 +27,45 @@ from unidepth.models import UniDepthV2
 from behave_data.video_reader import VideoController
 from behave_data.behave_video import BaseBehaveVideoData
 
+def depth_to_vis_frame(depth_mm):
+    """Convert uint16 depth map to uint8 visualization frame."""
+    depth_float = depth_mm.astype(np.float32)
+    valid = depth_float > 0
+    vis_u8 = np.zeros(depth_mm.shape, dtype=np.uint8)
+    if np.any(valid):
+        dmin = np.percentile(depth_float[valid], 1.0)
+        dmax = np.percentile(depth_float[valid], 99.0)
+        if dmax > dmin:
+            scaled = (depth_float - dmin) / (dmax - dmin)
+            scaled = np.clip(scaled, 0.0, 1.0)
+            vis_u8 = (scaled * 255.0).astype(np.uint8)
+    return cv2.cvtColor(vis_u8, cv2.COLOR_GRAY2BGR)
+
+
+def get_vis_outfile(depth_outfile):
+    root, ext = osp.splitext(depth_outfile)
+    if ext.lower() == '.mp4':
+        return f'{root}_vis{ext}'
+    return f'{depth_outfile}_vis.mp4'
+
+
+def create_vis_writer(vis_outfile, fps, frame_size):
+    # Prefer H.264 for better VSCode video preview compatibility.
+    codecs = ['avc1', 'H264', 'mp4v']
+    for codec in codecs:
+        writer = cv2.VideoWriter(
+            vis_outfile,
+            cv2.VideoWriter_fourcc(*codec),
+            fps,
+            frame_size
+        )
+        if writer.isOpened():
+            print(f'visualization codec: {codec}')
+            return writer
+        writer.release()
+    raise RuntimeError(f'Failed to open vis writer for {vis_outfile}')
+
+
 def get_intrinsics(kid):
     assert kid in [0, 1, 2, 3], f'invalid kinect index {kid}!'
     if kid == 0:
@@ -117,6 +156,8 @@ class UniDepthBehaveProcessor(BaseBehaveVideoData):
                 print("Already exists {}, all done".format(outfile))
                 continue
             depth_writer = None
+            vis_writer = None
+            vis_outfile = get_vis_outfile(outfile)
 
             video_iter = ctrl.video_iter
             focals = []
@@ -171,13 +212,23 @@ class UniDepthBehaveProcessor(BaseBehaveVideoData):
                         H, W = image.shape[:2]  # dynamic size
                         print('using image reso:', H, W)
                         depth_writer = Uint16Writer(outfile, (W, H), fps=args.fps)
+                        vis_writer = create_vis_writer(vis_outfile, args.fps, (W, H))
                     depth_writer.write(dmap)
+                    vis_writer.write(depth_to_vis_frame(dmap))
                         
             except StopIteration:
                 # video done, save dmap
                 depth_writer.close()
+                if vis_writer is not None:
+                    vis_writer.release()
                 print(f'{outfile} done')
+                print(f'{vis_outfile} done')
                 continue
+            if depth_writer is not None:
+                depth_writer.close()
+            if vis_writer is not None:
+                vis_writer.release()
+                print(f'{vis_outfile} done')
             if len(focals) > 0:
                 print('average focal length:', np.mean(focals))
                 # save as file
@@ -232,6 +283,8 @@ def process_procigen(args, kid_to_run):
         print("Using Procigen intrinsics:", intrinsics)
         video_iter = controller.video_iter
         depth_writer = None
+        vis_writer = None
+        vis_outfile = get_vis_outfile(outfile)
         
             
         for img in video_iter:
@@ -253,9 +306,14 @@ def process_procigen(args, kid_to_run):
                 # H, W = image.shape[:2]  # dynamic size
                 print('using image reso:', H, W)
                 depth_writer = Uint16Writer(outfile, (W, H), fps=args.fps)
+                vis_writer = create_vis_writer(vis_outfile, args.fps, (W, H))
             depth_writer.write(dmap)
+            vis_writer.write(depth_to_vis_frame(dmap))
         depth_writer.close()
+        if vis_writer is not None:
+            vis_writer.release()
         print(f'{outfile} done')
+        print(f'{vis_outfile} done')
 
 
 if __name__ == '__main__':

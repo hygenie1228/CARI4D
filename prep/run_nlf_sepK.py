@@ -39,7 +39,7 @@ class ViewSpecificNLFRunner(BaseBehaveVideoData):
         model = torch.jit.load(NLF_MODEL_PATH).cuda().eval() if model is None else model # works better for torch>=2.4
         device = 'cuda'
         gender = _sub_gender[self.video_prefix.split('_')[1]]
-        fitter_smplh = BodyFitter(BodyModel('smplh', gender, model_root=SMPL_MODEL_ROOT).to('cuda')).to(device)
+        fitter_smplh = BodyFitter(BodyModel('smplh', gender, model_root=SMPL_MODEL_ROOT + '/smplh').to('cuda')).to(device)
         
         if args.wild_video:
             K_all = np.array([self.camera_K])

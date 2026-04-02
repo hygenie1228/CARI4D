@@ -91,7 +91,7 @@ class NLF2Unidepth(BaseBehaveVideoData):
         self.times = times_cut
         assert len(nlf_verts_all) == len(self.times), f'inconsistent number of frames {len(nlf_verts_all)}!={len(self.times)} on {self.video_prefix}!'
 
-        fitter = BodyFitter(BodyModel('smplh', nlf_gender, model_root=SMPL_MODEL_ROOT).to('cuda')).to(device)
+        fitter = BodyFitter(BodyModel('smplh', nlf_gender, model_root=osp.join(SMPL_MODEL_ROOT, 'smplh')).to('cuda')).to(device)
         param_names = ['poses', 'betas', 'transls', 'center_pts', 'center_verts']
         params_all = {name: [] for name in param_names}
 
@@ -265,7 +265,11 @@ if __name__ == '__main__':
             params_all['transls'].append(params_k['transls'])
             params_all['center_pts'].append(params_k['center_pts'])
             params_all['center_verts'].append(params_k['center_verts'])
-            
+
+        if not params_all['poses']:
+            print(f"Error: no per-kid outputs for {video_prefix}; cannot merge. Skipping.")
+            continue
+
         params_all = {name: np.stack(params_all[name], axis=1) for name in params_all.keys()}
         params_all['frames']= params_k['frames']
         params_all['gender'] = params_k['gender']
