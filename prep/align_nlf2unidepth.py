@@ -32,6 +32,18 @@ import time
 
 class NLF2Unidepth(BaseBehaveVideoData):
     "align the NLF predictions to the unidepth predictions"
+
+    @staticmethod
+    def get_parser():
+        parser = BaseBehaveVideoData.get_parser()
+        parser.add_argument(
+            '--packed_root',
+            type=str,
+            default='data/behave/behave-packed',
+            help='Directory with {seq}_GT-packed.pkl when NLF/video frame counts must be synced',
+        )
+        return parser
+
     def align(self, args, kid_to_run=None):
         outfile = f'{args.outpath}/{self.video_prefix}_params.pkl'
         if osp.isfile(outfile) and not args.redo:
@@ -73,14 +85,37 @@ class NLF2Unidepth(BaseBehaveVideoData):
         last_frame = float(nlf_data['frames'][-1][1:])
         first_frame = float(nlf_data['frames'][0][1:])
         times_cut = [t for t in self.times if round(t, 3) <= last_frame and round(t, 3) >= first_frame]
-        print(f'Sequence {self.video_prefix} Cutting times to {len(self.times)} frames, last frame: {times_cut[-1]}, original last frame: {self.times[-1]}, packed data last frame: {nlf_data["frames"][-1]}')
+        print(f'Sequence {self.video_prefix} Cutting times to {len(times_cut)} frames, last frame: {times_cut[-1]}, original last frame: {self.times[-1]}, packed data last frame: {nlf_data["frames"][-1]}')
         # print out first frame info
         print(f'Sequence {self.video_prefix} First frame: {first_frame}, original first frame: {self.times[0]}, after cut: {times_cut[0]}, packed data first frame: {nlf_data["frames"][0]}')
         if len(times_cut) != len(nlf_verts_all):
             if len(times_cut) < len(nlf_verts_all):
-                gt_data = joblib.load(f'data/behave/behave-packed/{self.video_prefix}_GT-packed.pkl')
-                frames_gt = gt_data['frames']
-                times_cut = [self.time_str_to_float(t) for t in frames_gt]
+                packed_file = osp.join(args.packed_root, f'{self.video_prefix}_GT-packed.pkl')
+                if osp.isfile(packed_file):
+                    gt_data = joblib.load(packed_file)
+                    frames_gt = gt_data['frames']
+                    times_cut = [self.time_str_to_float(t) for t in frames_gt]
+                else:
+                    nlf_times = [self.time_str_to_float(f) for f in nlf_data['frames']]
+                    by_round = {round(nt, 3): i for i, nt in enumerate(nlf_times)}
+                    sel_idx, new_times = [], []
+                    for t in times_cut:
+                        rt = round(t, 3)
+                        if rt in by_round:
+                            sel_idx.append(by_round[rt])
+                            new_times.append(t)
+                    if len(sel_idx) < len(times_cut):
+                        print(
+                            f'warning: matched {len(sel_idx)}/{len(times_cut)} video times to NLF '
+                            f'({packed_file} missing); dropped unmatched frames'
+                        )
+                    if not sel_idx:
+                        raise FileNotFoundError(
+                            f'{packed_file} missing and no NLF frames match video timeline; '
+                            f'check -tstart matches run_nlf_sepK (often use -tstart 0 for full clips)'
+                        )
+                    nlf_verts_all = nlf_verts_all[sel_idx]
+                    times_cut = new_times
             else:
                 # simply append the last frame of nlf_verts_all
                 L1 = len(times_cut)

@@ -126,7 +126,16 @@ class BaseBehaveVideoData(object):
             self.times = np.arange(0, len(controllers[0]))
         else:
             if args.data_source == 'behave':
-                self.times = np.arange(start_time, end_time - 1. / fps, 1. / fps).tolist()
+                if start_time == 0.0 and osp.isfile(input_color):
+                    cap = cv2.VideoCapture(input_color)
+                    L = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap.release()
+                    if L > 0:
+                        self.times = (np.arange(L, dtype=np.float64) / float(fps)).tolist()
+                    else:
+                        self.times = np.arange(start_time, end_time - 1. / fps, 1. / fps).tolist()
+                else:
+                    self.times = np.arange(start_time, end_time - 1. / fps, 1. / fps).tolist()
             else:
                 self.times = np.arange(0, len(controllers[0]))
         self.video_prefix = video_prefix

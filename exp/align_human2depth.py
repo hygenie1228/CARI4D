@@ -34,6 +34,7 @@ import sys
 import cv2
 import numpy as np
 import open3d as o3d
+import smplx
 import torch
 import trimesh
 from tqdm import tqdm
@@ -51,7 +52,6 @@ from exp.align_utils import (
     erode_depth_cpu_fast,
     translation_only_icp_torch,
 )
-from smplfitter.pt import BodyFitter, BodyModel
 
 
 def depth2xyzmap(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
@@ -161,9 +161,15 @@ def align_sequence(
             f"Frame count mismatch: human_params T={T}, depth={n_d}, mask={n_m}"
         )
 
-    body_model = BodyModel("smplh", gender, model_root=smplh_root).to(device)
+    body_model = smplx.create(
+        model_path=smplh_root,
+        model_type="smplh",
+        gender=gender,
+        use_pca=False,
+        flat_hand_mean=True,
+        batch_size=1,
+    ).to(device)
     faces_np = np.asarray(body_model.faces, dtype=np.int64)
-    fitter = BodyFitter(body_model).to(device)
 
     nlf_verts_all = []
     with torch.no_grad():
@@ -171,11 +177,20 @@ def align_sequence(
             pv = torch.from_numpy(poses[i : i + 1]).float().to(device)
             b = torch.from_numpy(betas[i : i + 1]).float().to(device)
             tr = torch.from_numpy(trans[i : i + 1]).float().to(device)
-            out = body_model(pose_rotvecs=pv, shape_betas=b, trans=tr)
-            nlf_verts_all.append(out["vertices"][0].cpu().numpy())
+            out = body_model(
+                betas=b,
+                global_orient=pv[:, :3],
+                body_pose=pv[:, 3:66],
+                left_hand_pose=pv[:, 66:111],
+                right_hand_pose=pv[:, 111:156],
+                transl=tr,
+                return_verts=True,
+            )
+            nlf_verts_all.append(out.vertices[0].detach().cpu().numpy())
     nlf_verts_all = np.stack(nlf_verts_all, axis=0)
 
     verts_aligned: list[np.ndarray] = []
+    trans_offsets: list[np.ndarray] = []
     center_pts: list[np.ndarray] = []
     center_verts: list[np.ndarray] = []
 
@@ -254,6 +269,7 @@ def align_sequence(
                 "keeping unaligned NLF vertices"
             )
             verts_aligned.append(verts_nlf)
+            trans_offsets.append(np.zeros(3, dtype=np.float32))
             center_pts.append(np.zeros(3, dtype=np.float32))
             center_verts.append(np.mean(verts_nlf, axis=0).astype(np.float32))
             continue
@@ -298,6 +314,7 @@ def align_sequence(
             verts_nlf_align = verts_nlf
 
         verts_aligned.append(verts_nlf_align)
+        trans_offsets.append(np.mean(verts_nlf_align - verts_nlf, axis=0).astype(np.float32))
         center_pts.append(np.mean(pts_hum, axis=0).astype(np.float32))
         center_verts.append(np.mean(verts_nlf, axis=0).astype(np.float32))
 
@@ -307,17 +324,11 @@ def align_sequence(
         cap_d.release()
     cap_m.release()
 
-    verts_stack = np.stack(verts_aligned, 0)
-    fit_res = fitter.fit(
-        torch.from_numpy(verts_stack).to(device).float(),
-        num_iter=3,
-        requested_keys=["shape_betas", "trans", "vertices", "pose_rotvecs"],
-    )
-
-    poses156 = fit_res["pose_rotvecs"].cpu().numpy().astype(np.float32)
-    betas_out = fit_res["shape_betas"].cpu().numpy().astype(np.float32)
-    trans_out = fit_res["trans"].cpu().numpy().astype(np.float32)
-    go, bp, lh, rh = pose_rotvec156_to_npz_fields(poses156)
+    poses_out = poses[start:end].copy()
+    betas_out = betas[start:end].copy()
+    trans_out = trans[start:end].copy()
+    trans_out += np.stack(trans_offsets, axis=0)
+    go, bp, lh, rh = pose_rotvec156_to_npz_fields(poses_out)
 
     os.makedirs(osp.dirname(out_npz) or ".", exist_ok=True)
     np.savez(
