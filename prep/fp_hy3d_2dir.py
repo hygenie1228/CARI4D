@@ -90,7 +90,10 @@ if __name__ == '__main__':
         for video in videos:
             args.video = video
             processor = BehaveHy3D2DirFPRunner(args)
-            kid_to_run = int(selected_views[video_prefix][1]) if video_prefix in selected_views else args.kid
+            if args.wild_video:
+                kid_to_run = args.kid
+            else:
+                kid_to_run = int(selected_views[video_prefix][1]) if video_prefix in selected_views else args.kid
             processor.process_video(kid_to_run)
 
         # now collect results from different cameras into one file

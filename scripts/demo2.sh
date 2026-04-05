@@ -3,21 +3,21 @@ video=data/cari4d-demo/behave/videos/Date03_Sub03_chairblack_debug.2.color.mp4
 
 set -e
 
-# # Step 1: run Unidepth estimation
+# # # Step 1: run Unidepth estimation
 # python prep/unidepth_behave.py --cameras 2 --data_source behave -o data/cari4d-demo/behave/videos/  --video ${video}
 
-# # Step 2: run NLF to estimate human pose (add flags in NLF_EXTRA, e.g. -tstart 0 --redo --nlf_debug_dump exp/debug --nlf_debug_max 64)
+# # # Step 2: run NLF to estimate human pose (add flags in NLF_EXTRA, e.g. -tstart 0 --redo --nlf_debug_dump exp/debug --nlf_debug_max 64)
 # python prep/run_nlf_sepK.py --data_source behave -o data/cari4d-demo/behave/nlf-smplh-gender-sepK --masks_root data/cari4d-demo/behave/masks/ --video "${video}" -tstart 0
 
-# # Step 3: align NLF to unidepth prediction
-python prep/align_nlf2unidepth.py --data_source behave -tstart 0 -o data/cari4d-demo/behave/nlf-smplh-gender-sepK-2unidepth --masks_root data/cari4d-demo/behave/masks \
---nlf_path data/cari4d-demo/behave/nlf-smplh-gender-sepK --video ${video}
+# # # Step 3: align NLF to unidepth prediction
+# python prep/align_nlf2unidepth.py --data_source behave -tstart 0 -o data/cari4d-demo/behave/nlf-smplh-gender-sepK-2unidepth --masks_root data/cari4d-demo/behave/masks \
+# --nlf_path data/cari4d-demo/behave/nlf-smplh-gender-sepK --video ${video}
 
 # # Step 4: run FoundationPose
 # -tend must stay at or below the shortest color/depth stream end (see .time.json); 47.2 overshoots this clip and breaks load_color_depth on the last frames.
-# python prep/fp_hy3d_2dir.py --viz_path x --vis_thres 0.5 --vis_thres2 0.5 --iou_thres2 0.3 --angular_velo 0.1 --occ_frames_allowed 30 --kid 2 -tstart 0 -tend 47.17    \
-# --masks_root data/cari4d-demo/behave/masks/ --hy3d_root=data/cari4d-demo/meshes \
-#  --video ${video} -o data/cari4d-demo/behave/fp-hy3d3-unidepth
+python prep/fp_hy3d_2dir.py --viz_path x --vis_thres 0.5 --vis_thres2 0.5 --iou_thres2 0.3 --angular_velo 0.1 --occ_frames_allowed 30 --kid 2 -tstart 0   \
+--masks_root data/cari4d-demo/behave/masks/ --hy3d_root=data/cari4d-demo/meshes \
+ --video ${video} -o data/cari4d-demo/behave/fp-hy3d3-unidepth
 
 # # Step 5: run CoCoNet
 # python run_horefine.py config=learning/configs/cari4d-release.yml split_file=splits/demo-behave.json \

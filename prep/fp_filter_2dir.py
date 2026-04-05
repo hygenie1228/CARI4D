@@ -70,7 +70,7 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
                                 fps=2) if args.viz_path is not None else None # with viz, ~0.2s more per-frame 
         video_shape = None
         packed_data, pose_gt_all = None, None 
-        if self.video_prefix in START_END_FRAMES:
+        if self.video_prefix in START_END_FRAMES and not self.args.wild_video:
             last_frame = float(START_END_FRAMES[self.video_prefix][1][1:])
             first_frame = float(START_END_FRAMES[self.video_prefix][0][1:])
             times_cut = [t for t in self.times if round(t, 3) <= last_frame and round(t, 3) >= first_frame]
