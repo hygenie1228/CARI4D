@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Build exp_dir/cari4d/videos/* and masks/*.h5 from video.mp4 + processed/* (wild_video / kinect 0)."""
+"""Build exp_dir/cari4d/videos/* and masks/*.h5 from video.mp4 + processed/*.
+
+Output names use the kinect id from ``exp_dir`` basename: ``..._2`` ->
+``<prefix>.2.color.mp4``, ``<prefix>_masks_k2.h5``, etc. (``_<digits>`` missing -> 0).
+Intrinsics in ``*.color.pkl`` use the same BEHAVE sep-K table as that id.
+``human/human_params.npz`` is not read.
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +18,23 @@ import h5py
 import joblib
 import numpy as np
 from tqdm import tqdm
-from videoio import Uint16Writer
+
+
+def behave_intrinsics_fx_fy_cx_cy(kinect_id: int) -> tuple[float, float, float, float]:
+    """Same fx,fy,cx,cy as behave_data.utils.get_intrinsics_unified(behave, ..., kid, wild_video=False)."""
+    if kinect_id == 0:
+        fx, fy = 976.212, 976.047
+        cx, cy = 1017.958, 787.313
+    elif kinect_id == 1:
+        fx, fy = 979.784, 979.840
+        cx, cy = 1018.952, 779.486
+    elif kinect_id == 2:
+        fx, fy = 974.899, 974.337
+        cx, cy = 1018.747, 786.176
+    else:
+        fx, fy = 972.873, 972.790
+        cx, cy = 1022.0565, 770.397
+    return float(fx), float(fy), float(cx), float(cy)
 
 
 def main() -> None:
@@ -29,9 +51,8 @@ def main() -> None:
     base = osp.basename(exp_dir.rstrip("/"))
     m = re.match(r"^(.+)_(\d+)$", base)
     video_prefix = m.group(1) if m else base
-    kid = 0
+    kid = int(m.group(2)) if m else 0
 
-    npz_path = osp.join(exp_dir, "human", "human_params.npz")
     src_color = osp.join(exp_dir, "video.mp4")
     d_human = osp.join(exp_dir, "processed", "human_mask.mp4")
     d_obj = osp.join(exp_dir, "processed", "object_mask.mp4")
@@ -64,39 +85,19 @@ def main() -> None:
     assert osp.isfile(d_human) and osp.isfile(d_obj), (d_human, d_obj)
     assert osp.isfile(d_bgr), d_bgr
 
-    if osp.isfile(npz_path):
-        z = np.load(npz_path, allow_pickle=True)
-        intr = np.asarray(z["intrinsics"], dtype=np.float64).reshape(-1)[:4]
-    else:
-        intr = np.array([979.784, 979.840, 1018.952, 779.486], dtype=np.float64)
-        print(
-            "warning: human/human_params.npz missing; using default BEHAVE intrinsics. "
-            "FoundationPose expects human_params.npz in exp_dir."
-        )
+    fx, fy, cx, cy = behave_intrinsics_fx_fy_cx_cy(kid)
 
     os.makedirs(videos_dir, exist_ok=True)
     shutil.copy2(src_color, color_out)
-    joblib.dump(
-        {"fx": float(intr[0]), "fy": float(intr[1]), "cx": float(intr[2]), "cy": float(intr[3])},
-        pkl_out,
+    joblib.dump({"fx": fx, "fy": fy, "cx": cx, "cy": cy}, pkl_out)
+    print(
+        f"intrinsics from BEHAVE sep-K table (kinect_id={kid}): "
+        f"fx={fx} fy={fy} cx={cx} cy={cy} -> {pkl_out}"
     )
 
-    cap_r = cv2.VideoCapture(d_bgr)
-    fps = cap_r.get(cv2.CAP_PROP_FPS) or 30.0
-    n = int(cap_r.get(cv2.CAP_PROP_FRAME_COUNT))
-    W = int(cap_r.get(cv2.CAP_PROP_FRAME_WIDTH))
-    H = int(cap_r.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    depth_writer = Uint16Writer(depth_out, (W, H), fps=int(round(fps)))
-    for _ in tqdm(range(max(n, 1)), desc="processed/depth.mp4 -> depth-reg"):
-        ret, fr = cap_r.read()
-        if not ret or fr is None:
-            break
-        _b, g, r = cv2.split(fr)
-        d16 = (r.astype(np.uint32) << 8) | g.astype(np.uint32)
-        depth_writer.write(d16.astype(np.uint16))
-    cap_r.release()
-    depth_writer.close()
-    print("wrote", depth_out)
+    # processed/depth.mp4 from run_unidepth is already Uint16Writer / depth-reg-compatible; copy as-is.
+    shutil.copy2(d_bgr, depth_out)
+    print("copied", d_bgr, "->", depth_out)
 
     os.makedirs(masks_dir, exist_ok=True)
     cap_h = cv2.VideoCapture(d_human)

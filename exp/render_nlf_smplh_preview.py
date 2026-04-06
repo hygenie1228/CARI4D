@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 import imageio.v2 as imageio
 import joblib
@@ -23,6 +26,55 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 from lib_smpl import get_smpl  # noqa: E402
+
+
+class _PngStagingWriter:
+    """Save frames as %06d.png then mux with system ffmpeg if imageio-ffmpeg is missing."""
+
+    __slots__ = ("_dir", "_fps", "_out", "_n")
+
+    def __init__(self, staging_dir: str, fps: float, out_path: str) -> None:
+        self._dir = staging_dir
+        self._fps = fps
+        self._out = out_path
+        self._n = 0
+
+    def append_data(self, im: np.ndarray) -> None:
+        path = os.path.join(self._dir, f"{self._n:06d}.png")
+        imageio.imwrite(path, im)
+        self._n += 1
+
+    def close(self) -> None:
+        if self._n == 0:
+            shutil.rmtree(self._dir, ignore_errors=True)
+            return
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            shutil.rmtree(self._dir, ignore_errors=True)
+            raise RuntimeError(
+                "imageio FFMPEG plugin missing and no ffmpeg in PATH. "
+                "Install: pip install imageio-ffmpeg"
+            )
+        subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-framerate",
+                str(self._fps),
+                "-i",
+                os.path.join(self._dir, "%06d.png"),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                self._out,
+            ],
+            check=True,
+        )
+        shutil.rmtree(self._dir, ignore_errors=True)
 
 
 def _gender_str(d: dict) -> str:
@@ -121,9 +173,16 @@ def main() -> None:
     lim = float(np.percentile(np.abs(v0.reshape(-1, 3)), 99.0)) * 1.15 + 1e-6
 
     try:
-        writer = imageio.get_writer(a.out, fps=a.fps, codec="libx264", quality=8)
-    except TypeError:
-        writer = imageio.get_writer(a.out, fps=a.fps, format="FFMPEG")
+        try:
+            writer = imageio.get_writer(
+                a.out, format="FFMPEG", fps=a.fps, codec="libx264", quality=8
+            )
+        except TypeError:
+            writer = imageio.get_writer(a.out, format="FFMPEG", fps=a.fps)
+    except ImportError:
+        writer = _PngStagingWriter(
+            tempfile.mkdtemp(prefix="nlf_smplh_preview_"), a.fps, a.out
+        )
     plt.ioff()
     thumb_path = os.path.splitext(a.out)[0] + "_first.png"
     for fi in tqdm(range(len(verts)), desc="render frames"):

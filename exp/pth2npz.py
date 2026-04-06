@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
 """
-Export CoCoNet / HORefine-style ``*.pth`` (``gt`` / ``pr`` / ``in``) to experiment-folder NPZ files.
+Export CoCoNet / HORefine-style ``*.pth`` (``gt`` / ``pr`` / ``in``) to BEHAVE-style NPZ files.
 
-Writes only **init** (from ``in``) and **pred** (from ``pr``); **gt is not saved**.
+**Default** (prediction only): with ``--exp_dir``, finds::
 
-Outputs (under ``--exp_dir``)::
+  <exp_dir>/cari4d/coconet/**/<video_prefix>.pth
 
-  human/human_params_init.npz
-  human/human_params.npz
-  object/object_params_init.npz
-  object/object_params.npz
+``video_prefix`` is the directory basename without a trailing ``_<kinect_id>`` (same as
+``scripts/stage_exp_behave.py``). Writes ``pth['pr']`` to::
 
-Schema matches ``exp/behave_debug/Date03_Sub03_chairblack_lift_3``:
+  <exp_dir>/human/human_params.npz
+  <exp_dir>/object/object_params.npz
+
+Pass ``--pth /path/to/file.pth`` to skip discovery (any layout). Use ``--include_init`` to also
+write ``human_params_init.npz`` and ``object_params_init.npz`` from ``pth['in']`` (requires an
+``in`` block with the same tensor keys as ``pr``).
+
+NPZ schema matches ``exp/behave_debug/...``:
 
 - ``human/human_params*.npz``: global_orient, body_pose, lhand_pose, rhand_pose, betas,
   trans, gender (scalar unicode), intrinsics (fx, fy, cx, cy) float64
 - ``object/object_params*.npz``: angle (T, 3) float64 rotvec, trans (T, 3) float64,
   object_name scalar unicode
 
-``intrinsics`` / ``gender`` / ``object_name`` come from ``get_intrinsics_unified`` (``--seq_name``,
-``--kid``), ``--gender``, and ``--object_name`` (or inferred from ``seq_name``), not from another
-experiment folder.
+``intrinsics`` / ``gender`` / ``object_name`` use ``get_intrinsics_unified`` (``--seq_name``,
+``--kid``), ``--gender``, and ``--object_name`` (or inferred from pth frames / seq_name).
 
-Example::
+Kinect id: default ``--kid -1`` uses the numeric suffix on ``exp_dir`` basename (e.g.
+``..._lift_2`` -> 2); if there is no suffix, kid=0. Override with ``--kid``.
 
-  python exp/pth_to_npz.py \\
+Examples::
+
+  python exp/coconet2npz.py --exp_dir experiments/behave/Date03_Sub03_chairblack_lift_2
+
+  python exp/coconet2npz.py --exp_dir exp/behave_debug/foo \\
     --pth output/coconet/cari4d-release+init_viz_demo/Date03_Sub03_chairblack_lift.pth \\
-    --exp_dir exp/behave_debug/Date03_Sub03_chairblack_lift
+    --kid 2 --include_init
 """
 
 from __future__ import annotations
@@ -34,6 +43,7 @@ from __future__ import annotations
 import argparse
 import os
 import os.path as osp
+import re
 import sys
 
 import numpy as np
@@ -112,7 +122,6 @@ def write_human_params_npz(
         raise ValueError(
             f"Human length mismatch: pose T={T}, trans {trans.shape}, betas {betas_np.shape}"
         )
-    # Match ``setup_date03`` / reference trees: compact unicode scalars (length fits string).
     gender_arr = np.array(str(gender))
     intr = np.asarray(intrinsics, dtype=np.float64).reshape(4)
     os.makedirs(osp.dirname(out_path) or ".", exist_ok=True)
@@ -141,57 +150,111 @@ def write_object_params_npz(
     np.savez(out_path, angle=angle, trans=trans, object_name=oname)
 
 
-def main():
+def exp_basename_to_video_prefix_and_kid(exp_dir: str) -> tuple[str, int]:
+    base = osp.basename(osp.abspath(exp_dir).rstrip("/"))
+    m = re.match(r"^(.+)_(\d+)$", base)
+    if m:
+        return m.group(1), int(m.group(2))
+    return base, 0
+
+
+def find_coconet_pth(exp_dir: str, video_prefix: str) -> str:
+    root = osp.join(osp.abspath(exp_dir), "cari4d", "coconet")
+    if not osp.isdir(root):
+        raise FileNotFoundError(
+            f"Expected CoCoNet directory: {root}. Pass --pth to the .pth file explicitly."
+        )
+
+    want = f"{video_prefix}.pth"
+    matches: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        if want in filenames:
+            matches.append(osp.join(dirpath, want))
+
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        any_pth: list[str] = []
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                if fn.endswith(".pth"):
+                    any_pth.append(osp.join(dirpath, fn))
+        if len(any_pth) == 1:
+            return any_pth[0]
+        raise FileNotFoundError(
+            f"No {want} under {root}; found {len(any_pth)} other .pth file(s). "
+            "Pass --pth explicitly."
+        )
+    raise ValueError(f"Multiple {want} under {root}: {matches}")
+
+
+def _require_block_keys(block: dict, keys: tuple[str, ...], label: str) -> None:
+    for k in keys:
+        if k not in block:
+            raise KeyError(f"pth['{label}'] must contain '{k}'")
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pth", type=str, required=True, help="Path to run_horefine .pth")
     parser.add_argument(
         "--exp_dir",
         type=str,
         required=True,
-        help="Experiment root (creates human/ and object/ underneath)",
+        help="Experiment root for output NPZ files (and default .pth discovery)",
+    )
+    parser.add_argument(
+        "--pth",
+        type=str,
+        default="",
+        help="Path to CoCoNet .pth (default: discover under exp_dir/cari4d/coconet/)",
     )
     parser.add_argument(
         "--seq_name",
         type=str,
         default="",
-        help="BEHAVE sequence name (e.g. Date03_Sub03_chairblack_lift). "
-        "Default: from first entry in pth frames.",
+        help="BEHAVE sequence name for intrinsics (default: from pth frames)",
     )
     parser.add_argument(
         "--kid",
         type=int,
-        default=2,
-        help="Kinect / vanilla id for get_intrinsics_unified (default: 2)",
+        default=-1,
+        help="Kinect id for get_intrinsics_unified; default: from exp_dir basename _<id>, else 0",
     )
-    parser.add_argument("--gender", type=str, default="male", help="SMPL-H gender (default: male)")
+    parser.add_argument("--gender", type=str, default="male", help="SMPL-H gender")
     parser.add_argument(
         "--object_name",
         type=str,
         default="",
-        help="Short object label for object_params.npz (default: third segment of seq_name)",
+        help="object_params object_name (default: inferred from seq_name)",
+    )
+    parser.add_argument(
+        "--include_init",
+        action="store_true",
+        help="Also write *_init.npz from pth['in'] (requires 'in' block)",
     )
     args = parser.parse_args()
 
-    pth_path = osp.abspath(args.pth)
     exp_dir = osp.abspath(args.exp_dir)
-    if not osp.isfile(pth_path):
-        raise FileNotFoundError(pth_path)
+    video_prefix, kid_default = exp_basename_to_video_prefix_and_kid(exp_dir)
+    kid = kid_default if args.kid < 0 else args.kid
+
+    if args.pth.strip():
+        pth_path = osp.abspath(args.pth.strip())
+        if not osp.isfile(pth_path):
+            raise FileNotFoundError(pth_path)
+    else:
+        pth_path = find_coconet_pth(exp_dir, video_prefix)
 
     raw = torch.load(pth_path, map_location="cpu", weights_only=False)
-    if not isinstance(raw, dict) or "in" not in raw or "pr" not in raw:
-        raise KeyError("pth must be a dict with 'in' and 'pr' keys")
+    if not isinstance(raw, dict) or "pr" not in raw:
+        raise KeyError("pth must be a dict with a 'pr' key")
 
-    data_in = raw["in"]
     data_pr = raw["pr"]
-
-    for k in ("smpl_pose", "smpl_t", "betas", "pose_abs"):
-        if k not in data_in or k not in data_pr:
-            raise KeyError(f"pth blocks must contain '{k}'")
+    _require_block_keys(data_pr, ("smpl_pose", "smpl_t", "betas", "pose_abs"), "pr")
 
     seq_name = args.seq_name.strip() or infer_seq_name_from_pth(raw)
     object_name = args.object_name.strip() or infer_object_name(seq_name)
-    gender = args.gender
-    K = get_intrinsics_unified("behave", seq_name, args.kid, wild_video=False)
+    K = get_intrinsics_unified("behave", seq_name, kid, wild_video=False)
     intr = np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=np.float64)
 
     hum_dir = osp.join(exp_dir, "human")
@@ -199,31 +262,41 @@ def main():
     os.makedirs(hum_dir, exist_ok=True)
     os.makedirs(obj_dir, exist_ok=True)
 
-    hi = osp.join(hum_dir, "human_params_init.npz")
     hp = osp.join(hum_dir, "human_params.npz")
-    oi = osp.join(obj_dir, "object_params_init.npz")
     op = osp.join(obj_dir, "object_params.npz")
 
-    write_human_params_npz(
-        hi,
-        data_in["smpl_pose"],
-        data_in["smpl_t"],
-        data_in["betas"],
-        gender=gender,
-        intrinsics=intr,
-    )
     write_human_params_npz(
         hp,
         data_pr["smpl_pose"],
         data_pr["smpl_t"],
         data_pr["betas"],
-        gender=gender,
+        gender=args.gender,
         intrinsics=intr,
     )
-    write_object_params_npz(oi, data_in["pose_abs"], object_name)
     write_object_params_npz(op, data_pr["pose_abs"], object_name)
+    written = [hp, op]
 
-    for p in (hi, hp, oi, op):
+    if args.include_init:
+        if "in" not in raw:
+            raise KeyError("pth must contain 'in' when using --include_init")
+        data_in = raw["in"]
+        _require_block_keys(data_in, ("smpl_pose", "smpl_t", "betas", "pose_abs"), "in")
+        hi = osp.join(hum_dir, "human_params_init.npz")
+        oi = osp.join(obj_dir, "object_params_init.npz")
+        write_human_params_npz(
+            hi,
+            data_in["smpl_pose"],
+            data_in["smpl_t"],
+            data_in["betas"],
+            gender=args.gender,
+            intrinsics=intr,
+        )
+        write_object_params_npz(oi, data_in["pose_abs"], object_name)
+        written.extend([hi, oi])
+
+    print("pth:", pth_path)
+    print("seq_name:", seq_name, "kid:", kid)
+    for p in written:
         print("wrote", p)
 
 

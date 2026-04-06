@@ -184,7 +184,8 @@ class ContactOptimConfig:
     pth_file: str = 'xxx' # path to the pth file, contains input, pr and GT 
     wild_video: bool = False # whether the video is in the wild
     data_source: str = 'behave' # behave or hodome 
-    
+    view_id: Optional[int] = None  # kinect index for masks/intrinsics; if None use splits/selected-views-map.json else 1
+
     # opt configs
     lr: float = 0.001
     num_steps: int = 300
@@ -201,7 +202,7 @@ class ContactOptimConfig:
     # data paths
     video_root: str = 'data/behave/videos-demo'
     masks_root: str = 'data/behave/masks-h5-my'
-    packed_root: str = 'data/behave/behave-packed'
+    packed_root: str = 'data/behave/behave-packed'  # BEHAVE *_GT-packed.pkl; optional if pth has verts + contact_logits
     hy3d_meshes_root: str = 'data/behave/selected-views/hy3d-aligned-center'
     index: Optional[int] = None # index of the video to use
 

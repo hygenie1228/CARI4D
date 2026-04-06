@@ -23,6 +23,7 @@ import joblib
 import h5py
 import torch
 from behave_data.behave_video import BaseBehaveVideoData, load_masks
+from behave_data.utils import availabe_kindata
 from lib_smpl import get_smpl, SMPL_MODEL_ROOT
 from tools import icp_utils
 import open3d as o3d 
@@ -264,16 +265,22 @@ if __name__ == '__main__':
         chunk_size = len(videos) // 100 + 1 
         videos = videos[args.index * chunk_size:(args.index + 1) * chunk_size]
     print(f"In total {len(videos)} video files")
-    kids = args.cameras 
-    if args.wild_video:
-        kids = [0] 
     args_orig = args
+    kinect_count = 6 if args.data_source == "intercap" else 4
     for video in tqdm(videos):
-        video_prefix = osp.basename(video).split('.')[0]
+        video_prefix = osp.basename(video).split(".")[0]
         outfile = f'{args.outpath}/{video_prefix}_params.pkl'
         if osp.isfile(outfile) and not args.redo:
             print(f'{outfile} already exists, skipping')
             continue
+
+        if args.wild_video:
+            kids, _ = availabe_kindata(video, kinect_count=kinect_count)
+            if not kids:
+                print(f"Warning: no kinect color mp4 found for {video}; skipping align")
+                continue
+        else:
+            kids = list(args.cameras)
 
         # multiplrocessing 
         args = deepcopy(args_orig)

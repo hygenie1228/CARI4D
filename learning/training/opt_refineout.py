@@ -48,10 +48,13 @@ HAND_JOINT_INDICES = [22, 23+15]
 class RefineOutOptimizer(BaseBehaveVideoData):
     def __init__(self, cfg: RefineOutOptimConfig):
         seq_name = osp.basename(cfg.pth_file).split('.')[0]
-        view_id = get_test_view_id(seq_name)
-        view_id = view_id if view_id is not None else 1
         if cfg.wild_video:
             view_id = 0
+        elif cfg.view_id is not None:
+            view_id = cfg.view_id
+        else:
+            view_id = get_test_view_id(seq_name)
+            view_id = view_id if view_id is not None else 1
 
         self.view_id = view_id
         self.seq_name = seq_name
@@ -249,15 +252,49 @@ class RefineOutOptimizer(BaseBehaveVideoData):
         # get view id for this seq 
         # 2d joints and contacts (GT)
         view_id = self.view_id
-        pack_file = f'{self.cfg.packed_root}/{seq_name}_GT-packed.pkl'
-        pack_data = joblib.load(pack_file)
-        frames_gt = pack_data['frames'] 
-        # get indices at gt data
-        frame_inds = np.array([frames_gt.index(x) for x in frames_pr])
-        if isinstance(pack_data['joints2d'], list):
-            pack_data['joints2d'] = np.stack(pack_data['joints2d'])
-        joints_2d = pack_data['joints2d'][frame_inds, view_id] # (L, 25, 3)
+        # Intrinsics first: needed for packed-free 2D targets from pr['verts'].
+        if not self.cfg.wild_video:
+            K_full = get_intrinsics_unified(self.cfg.data_source, seq_name, view_id, self.cfg.wild_video)
+        else:
+            K_full = self.camera_K.copy()
+            print(f'Using camera intrinsics: {K_full}')
+        K_full_th = torch.from_numpy(K_full).float().to(self.device)
         op_thres = self.cfg.op_thres
+
+        pack_file = f'{self.cfg.packed_root}/{seq_name}_GT-packed.pkl'
+        pack_data, frame_inds = None, None
+        if osp.isfile(pack_file):
+            pack_data = joblib.load(pack_file)
+            frames_gt = pack_data['frames']
+            frame_inds = np.array([frames_gt.index(x) for x in frames_pr])
+            if isinstance(pack_data['joints2d'], list):
+                pack_data['joints2d'] = np.stack(pack_data['joints2d'])
+            joints_2d = pack_data['joints2d'][frame_inds, view_id]  # (L, 25, 3)
+        else:
+            print(
+                f'No BEHAVE packed GT at {pack_file}; using 2D joint targets from pr["verts"] '
+                f'reprojection (same camera as optimization). For full BEHAVE eval, add *_GT-packed.pkl.'
+            )
+            if 'verts' not in pth_data['pr']:
+                raise FileNotFoundError(
+                    f'{pack_file} missing and pr has no verts; cannot build 2D targets. '
+                    'Use a CoCoNet .pth that includes verts, or provide packed GT.'
+                )
+            verts_pr = pth_data['pr']['verts']
+            if not isinstance(verts_pr, torch.Tensor):
+                verts_pr = torch.from_numpy(verts_pr)
+            verts_pr = verts_pr.float().to(self.device)
+            if verts_pr.shape[0] != len(frames_pr):
+                raise ValueError(
+                    f'pr["verts"] length {verts_pr.shape[0]} != len(frames_pr) {len(frames_pr)}'
+                )
+            joints_25_3d = self.landmark.get_body_kpts_batch_torch(verts_pr)
+            joints_25_proj = joints_25_3d @ K_full_th.T
+            joints_2d_xy = (joints_25_proj[:, :, :2] / joints_25_proj[:, :, 2:3]).detach().cpu().numpy()
+            joints_2d = np.concatenate(
+                [joints_2d_xy, np.ones((joints_2d_xy.shape[0], joints_2d_xy.shape[1], 1), dtype=np.float32)],
+                axis=-1,
+            )
 
         # use predicted contacts 
         if 'contact_logits' in pth_data['pr']:
@@ -271,6 +308,10 @@ class RefineOutOptimizer(BaseBehaveVideoData):
             print(f"Using predicted contacts, prediction type: {self.cfg.contact_pred_type}")
         else:
             assert self.cfg.use_gt, 'no contact logits found and use_gt is False'
+            assert pack_data is not None and frame_inds is not None, (
+                'GT contacts need dists_h2o from packed GT; use contact_logits in pth (demo default), '
+                f'or add {pack_file}'
+            )
             contact_mask = pack_data['dists_h2o'][0, frame_inds][:, np.array(HAND_JOINT_INDICES)] < self.cfg.contact_mask_thres # hand contact mask
             print("Using GT contacts")
         assert len(contact_mask) == len(obj_axis) == len(joints_2d), f'lengths do not match: {len(contact_mask)}, {len(obj_axis)}, {len(joints_2d)}'
@@ -278,14 +319,6 @@ class RefineOutOptimizer(BaseBehaveVideoData):
         opt_dict['joints_2d'] = torch.from_numpy(joints_2d).float().to(self.device)
 
         # 2D masks and occlusion masks 
-        if not self.cfg.wild_video:
-            K_full = get_intrinsics_unified(self.cfg.data_source, seq_name, view_id, self.cfg.wild_video)
-        else:
-            # simply use the camera
-            K_full = self.camera_K.copy() 
-            # assert self.scale_ratio == 1.0, f'scale ratio should be 1 instead of {self.scale_ratio} for wild video'
-            print(f'Using camera intrinsics: {K_full}')
-        K_full_th = torch.from_numpy(K_full).float().to(self.device)
         rend_size = 256
         focal = np.array([K_full[0, 0], K_full[1, 1]])
         principal_point = np.array([K_full[0, 2], K_full[1, 2]])

@@ -25,8 +25,7 @@ masks_root=data/cari4d-demo/behave/masks/ \
 fp_root=data/cari4d-demo/behave/fp-hy3d3-unidepth \
 nlf_root=data/cari4d-demo/behave/nlf-smplh-gender-sepK-2unidepth \
 video=${video} cam_id=2 \
-outpath=output/coconet \
-init_viz_only=True
+outpath=output/coconet 
 # cam_id: uses sequences named like ${video_prefix}.${cam_id}.color.mp4
 
 # # Step 6: run optimization
