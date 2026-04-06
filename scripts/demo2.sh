@@ -25,26 +25,26 @@ cam_id="${BASH_REMATCH[2]}"
 # --masks_root data/cari4d-demo/behave/masks/ --hy3d_root=data/cari4d-demo/meshes \
 #  --video ${video} -o data/cari4d-demo/behave/fp-hy3d3-unidepth
 
-# # Step 5: run CoCoNet
-# python run_horefine.py config=learning/configs/cari4d-release.yml split_file=splits/demo-behave.json \
-# use_sel_view=True render_video=True identifier=_demo use_intermediate=True data_name=test-only \
-# hy3d_meshes_root=data/cari4d-demo/meshes \
-# masks_root=data/cari4d-demo/behave/masks/ \
-# fp_root=data/cari4d-demo/behave/fp-hy3d3-unidepth \
-# nlf_root=data/cari4d-demo/behave/nlf-smplh-gender-sepK-2unidepth \
-# video=${video} cam_id=${cam_id} \
-# outpath=output/coconet
+# # # Step 5: run CoCoNet
+python run_horefine.py config=learning/configs/cari4d-release.yml split_file=splits/demo-behave.json \
+use_sel_view=True render_video=True identifier=_demo use_intermediate=True data_name=test-only \
+hy3d_meshes_root=data/cari4d-demo/meshes \
+masks_root=data/cari4d-demo/behave/masks/ \
+fp_root=data/cari4d-demo/behave/fp-hy3d3-unidepth \
+nlf_root=data/cari4d-demo/behave/nlf-smplh-gender-sepK-2unidepth \
+video=${video} cam_id=${cam_id} \
+outpath=output/coconet
 
 # Step 6: run optimization (video_prefix must match CoCoNet .pth stem, e.g. Date03_Sub03_chairblack_debug.pth)
-echo "video=${video} video_prefix=${video_prefix} cam_id=${cam_id}"
-python learning/training/opt_refineout.py num_steps=3000 w_acc_v=600 w_contact=300  save_name=optv2 batch_size=192 opt_rot=True \
-opt_trans=True w_temp=1000 w_sil=0.002 w_contact=200.0 w_pen=2.0 w_j2d=0.03 opt_smpl_trans=False opt_betas=False  \
-pth_file=output/coconet/cari4d-release+step031397_demo/${video_prefix}.pth  \
-video_root=data/cari4d-demo/behave/videos/ \
-packed_root=data/cari4d-demo/behave/packed \
-masks_root=data/cari4d-demo/behave/masks/  \
-hy3d_meshes_root=data/cari4d-demo/meshes outpath=output/opt view_id="${cam_id}"
-# Note: use batch size=64 if OOM for GPU with memory <=24GB, e.g. 4090.
+# echo "video=${video} video_prefix=${video_prefix} cam_id=${cam_id}"
+# python learning/training/opt_refineout.py num_steps=3000 w_acc_v=600 w_contact=300  save_name=optv2 batch_size=192 opt_rot=True \
+# opt_trans=True w_temp=1000 w_sil=0.002 w_contact=200.0 w_pen=2.0 w_j2d=0.03 opt_smpl_trans=False opt_betas=False  \
+# pth_file=output/coconet/cari4d-release+step031397_demo/${video_prefix}.pth  \
+# video_root=data/cari4d-demo/behave/videos/ \
+# packed_root=data/cari4d-demo/behave/packed \
+# masks_root=data/cari4d-demo/behave/masks/  \
+# hy3d_meshes_root=data/cari4d-demo/meshes outpath=output/opt view_id="${cam_id}"
+# # Note: use batch size=64 if OOM for GPU with memory <=24GB, e.g. 4090.
 
 
 # body_models path

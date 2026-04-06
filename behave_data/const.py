@@ -10,7 +10,7 @@
 some meta data for the dataset
 
 """
-import json, glob
+import json, glob, os
 import numpy as np
 
 # add HODome subjects: Subject01: female 
@@ -74,6 +74,9 @@ def get_test_view_id(video_prefix):
     return int(selected_views[video_prefix][1])
 
 def get_hy3d_mesh_file(video_prefix, meshes_root='data/behave/selected-views/hy3d-aligned-center'):
+    if meshes_root.lower().endswith('.obj') and os.path.isfile(meshes_root):
+        print('using HY3D mesh:', meshes_root)
+        return meshes_root
     obj_name = video_prefix.split('_')[2]
     files = sorted(glob.glob(f'{meshes_root}/{video_prefix}*/*{obj_name}*_align.obj'))
     if len(files) == 0:

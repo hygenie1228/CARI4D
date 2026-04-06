@@ -42,7 +42,29 @@ class ViewSpecificNLFRunner(BaseBehaveVideoData):
         fitter_smplh = BodyFitter(BodyModel('smplh', gender, model_root=SMPL_MODEL_ROOT + '/smplh').to('cuda')).to(device)
         
         if args.wild_video:
-            K_all = np.array([self.camera_K])
+            video_abs = osp.abspath(args.video)
+            cari4d_root = osp.dirname(osp.dirname(video_abs))
+            intr_path = osp.join(cari4d_root, "intrinsics.pkl")
+            if self.args.data_source == "behave" and osp.isfile(intr_path):
+                d = joblib.load(intr_path)
+                K_staged = np.asarray(d["K"], dtype=np.float32)
+                kid_saved = int(d["kid"])
+                K_all = np.stack(
+                    [
+                        K_staged if int(kid) == kid_saved
+                        else get_intrinsics_unified(
+                            self.args.data_source, self.video_prefix, kid, False
+                        ).astype(np.float32)
+                        for kid in self.kids
+                    ],
+                    axis=0,
+                )
+                print(
+                    f"NLF wild_video: K from staged {intr_path} for kid {kid_saved}; "
+                    f"other views from get_intrinsics_unified"
+                )
+            else:
+                K_all = np.array([self.camera_K])
         else:
             K_all = [get_intrinsics_unified(self.args.data_source, self.video_prefix, kid, self.args.wild_video) for kid in self.kids]
             K_all = np.array(K_all) 

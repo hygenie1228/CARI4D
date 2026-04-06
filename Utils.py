@@ -98,13 +98,16 @@ def set_logging_format(level=logging.INFO):
 
 set_logging_format()
 
+# Flat RGB for OBJs with missing/broken mtllib (keeps TexturesUV so SMPL + object can batch-join).
+_HY3D_DUMMY_TEX_SIZE = 4
+_HY3D_DUMMY_TEX_RGB = (0.55, 0.55, 0.55)
+
 
 def load_smpl_obj_uvmap(video_prefix, use_hy3d=False, seq_name=None, human_texture='part', hum_only=False, 
         meshes_root='data/behave/selected-views/hy3d-aligned-center'):
-  from pytorch3d.structures import join_meshes_as_scene
+  from pytorch3d.structures import join_meshes_as_scene, join_meshes_as_batch, Meshes
   from pytorch3d.renderer import TexturesUV
-  from pytorch3d.io import load_objs_as_meshes
-  from pytorch3d.structures import Meshes
+  from pytorch3d.io import load_obj
   from behave_data.const import get_hy3d_mesh_file
   from behave_data.utils import get_template_path, get_render_template_path_from_seq
   
@@ -118,7 +121,38 @@ def load_smpl_obj_uvmap(video_prefix, use_hy3d=False, seq_name=None, human_textu
     files = files[:1]
   
   print('loading templates from', files)
-  meshes = load_objs_as_meshes(files, device='cuda')
+  device = torch.device('cuda')
+  mesh_list = []
+  for f_obj in files:
+    verts, faces, aux = load_obj(f_obj, load_textures=True, device=device)
+    tex_maps = aux.texture_images
+    if tex_maps is not None and len(tex_maps) > 0:
+      verts_uvs = aux.verts_uvs.to(device)
+      faces_uvs = faces.textures_idx.to(device)
+      image = list(tex_maps.values())[0].to(device)[None]
+      tex = TexturesUV(verts_uvs=[verts_uvs], faces_uvs=[faces_uvs], maps=image)
+    else:
+      # No texture image (missing mtllib, etc.): dummy flat map so join_meshes_as_batch stays TexturesUV throughout.
+      logging.info(
+          'No OBJ texture map for %s; using %dx%d dummy RGB (%.2f, %.2f, %.2f)',
+          f_obj, _HY3D_DUMMY_TEX_SIZE, _HY3D_DUMMY_TEX_SIZE,
+          *_HY3D_DUMMY_TEX_RGB)
+      if aux.verts_uvs is not None and aux.verts_uvs.numel() > 0 and faces.textures_idx is not None and faces.textures_idx.numel() > 0:
+        verts_uvs = aux.verts_uvs.to(device)
+        faces_uvs = faces.textures_idx.to(device)
+      else:
+        Nv = int(verts.shape[0])
+        verts_uvs = torch.full((Nv, 2), 0.5, device=device, dtype=torch.float32)
+        faces_uvs = faces.verts_idx.to(device)
+      s = _HY3D_DUMMY_TEX_SIZE
+      r, g, b = _HY3D_DUMMY_TEX_RGB
+      image = torch.empty((1, s, s, 3), device=device, dtype=torch.float32)
+      image[..., 0].fill_(r)
+      image[..., 1].fill_(g)
+      image[..., 2].fill_(b)
+      tex = TexturesUV(verts_uvs=[verts_uvs], faces_uvs=[faces_uvs], maps=image)
+    mesh_list.append(Meshes(verts=[verts.to(device)], faces=[faces.verts_idx.to(device)], textures=tex))
+  meshes = join_meshes_as_batch(mesh_list) if len(mesh_list) > 1 else mesh_list[0]
 
   scene = join_meshes_as_scene(meshes)
   tex: TexturesUV = scene.textures

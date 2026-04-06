@@ -3,7 +3,9 @@
 
 Output names use the kinect id from ``exp_dir`` basename: ``..._2`` ->
 ``<prefix>.2.color.mp4``, ``<prefix>_masks_k2.h5``, etc. (``_<digits>`` missing -> 0).
-Intrinsics in ``*.color.pkl`` use the same BEHAVE sep-K table as that id.
+Intrinsics come from ``behave_data.utils.get_intrinsics_unified`` (BEHAVE, kid =
+trailing digits of ``exp_dir`` basename, e.g. ``..._2`` -> kinect 2). Written to
+``cari4d/intrinsics.pkl`` and ``videos/*.color.pkl`` for ``--wild_video`` NLF.
 ``human/human_params.npz`` is not read.
 """
 from __future__ import annotations
@@ -13,28 +15,15 @@ import os
 import re
 import shutil
 import os.path as osp
+import sys
 import cv2
 import h5py
 import joblib
 import numpy as np
 from tqdm import tqdm
 
-
-def behave_intrinsics_fx_fy_cx_cy(kinect_id: int) -> tuple[float, float, float, float]:
-    """Same fx,fy,cx,cy as behave_data.utils.get_intrinsics_unified(behave, ..., kid, wild_video=False)."""
-    if kinect_id == 0:
-        fx, fy = 976.212, 976.047
-        cx, cy = 1017.958, 787.313
-    elif kinect_id == 1:
-        fx, fy = 979.784, 979.840
-        cx, cy = 1018.952, 779.486
-    elif kinect_id == 2:
-        fx, fy = 974.899, 974.337
-        cx, cy = 1018.747, 786.176
-    else:
-        fx, fy = 972.873, 972.790
-        cx, cy = 1022.0565, 770.397
-    return float(fx), float(fy), float(cx), float(cy)
+sys.path.insert(0, osp.join(osp.dirname(__file__), ".."))
+from behave_data.utils import get_intrinsics_unified
 
 
 def main() -> None:
@@ -85,15 +74,23 @@ def main() -> None:
     assert osp.isfile(d_human) and osp.isfile(d_obj), (d_human, d_obj)
     assert osp.isfile(d_bgr), d_bgr
 
-    fx, fy, cx, cy = behave_intrinsics_fx_fy_cx_cy(kid)
+    K = get_intrinsics_unified("behave", video_prefix, kid, wild_video=False).astype(np.float32)
+    fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+    intr_pack_path = osp.join(work_root, "intrinsics.pkl")
+    os.makedirs(work_root, exist_ok=True)
+    joblib.dump(
+        {"fx": fx, "fy": fy, "cx": cx, "cy": cy, "K": K, "kid": int(kid)},
+        intr_pack_path,
+    )
+    print(
+        f"wrote {intr_pack_path} (get_intrinsics_unified behave kid={kid}): "
+        f"fx={fx} fy={fy} cx={cx} cy={cy}"
+    )
 
     os.makedirs(videos_dir, exist_ok=True)
     shutil.copy2(src_color, color_out)
     joblib.dump({"fx": fx, "fy": fy, "cx": cx, "cy": cy}, pkl_out)
-    print(
-        f"intrinsics from BEHAVE sep-K table (kinect_id={kid}): "
-        f"fx={fx} fy={fy} cx={cx} cy={cy} -> {pkl_out}"
-    )
+    print(f"intrinsics mirrored -> {pkl_out}")
 
     # processed/depth.mp4 from run_unidepth is already Uint16Writer / depth-reg-compatible; copy as-is.
     shutil.copy2(d_bgr, depth_out)
