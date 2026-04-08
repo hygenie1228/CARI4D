@@ -16,6 +16,8 @@ else
   cam_id=0
 fi
 video="${videos_dir}/${video_prefix}.${cam_id}.color.mp4"
+# AABB-centered copy from stage_exp_behave (must match --hy3d_root mesh)
+hy3d_mesh="${cari4d}/hy3d_staged/${video_prefix}_export/${video_prefix}_align.obj"
 
 set -e
 mkdir -p "${nlf_dir}" "${nlf_ud_dir}" "${fp_dir}"
@@ -38,7 +40,7 @@ python prep/fp_hy3d_2dir.py --wild_video --viz_path x --vis_thres 0.5 --vis_thre
 # Step 5: run CoCoNet
 python run_horefine.py config=learning/configs/cari4d-release.yml split_file=splits/demo-behave.json \
 use_sel_view=True render_video=True identifier=_demo use_intermediate=True data_name=test-only \
-hy3d_meshes_root="${exp_dir}/object/model.obj" \
+hy3d_meshes_root="${hy3d_mesh}" \
 masks_root="${masks_dir}" \
 fp_root="${fp_dir}" \
 nlf_root="${nlf_ud_dir}" \
@@ -52,7 +54,7 @@ view_id="${cam_id}" \
 pth_file="${cari4d}/coconet/cari4d-release+step031397_demo/${video_prefix}.pth" \
 video_root="${videos_dir}/" \
 masks_root="${masks_dir}" \
-hy3d_meshes_root="${exp_dir}/object/model.obj" outpath="${cari4d}/opt"
+hy3d_meshes_root="${hy3d_mesh}" outpath="${cari4d}/opt"
 
 # Step 7: refined (and CoCoNet) checkpoints -> human/object_params*.npz under exp_dir
 python scripts/pth2npz.py --exp_dir "${exp_dir}" \

@@ -7,6 +7,9 @@ Intrinsics come from ``behave_data.utils.get_intrinsics_unified`` (BEHAVE, kid =
 trailing digits of ``exp_dir`` basename, e.g. ``..._2`` -> kinect 2). Written to
 ``cari4d/intrinsics.pkl`` and ``videos/*.color.pkl`` for ``--wild_video`` NLF.
 ``human/human_params.npz`` is not read.
+
+If ``object/model.obj`` exists, ``cari4d/hy3d_staged/.../*_align.obj`` is written as a mesh whose
+axis-aligned bounding-box center sits at the origin (not a symlink to the source).
 """
 from __future__ import annotations
 
@@ -26,13 +29,62 @@ sys.path.insert(0, osp.join(osp.dirname(__file__), ".."))
 from behave_data.utils import get_intrinsics_unified
 
 
+def write_obj_aabb_center_at_origin(src_path: str, dst_path: str) -> np.ndarray:
+    """Copy Wavefront OBJ from ``src_path`` to ``dst_path``, translating all ``v`` vertices so the
+    axis-aligned bounding-box center is at the origin. Returns the AABB center subtracted (float64
+    (3,)).
+    """
+    vmin = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+    vmax = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+    with open(src_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 4 and parts[0] == "v":
+                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                vmin[0] = min(vmin[0], x)
+                vmin[1] = min(vmin[1], y)
+                vmin[2] = min(vmin[2], z)
+                vmax[0] = max(vmax[0], x)
+                vmax[1] = max(vmax[1], y)
+                vmax[2] = max(vmax[2], z)
+    if not np.isfinite(vmin).all():
+        raise RuntimeError(f"no vertex lines (v x y z) found in {src_path}")
+    center = (vmin + vmax) * 0.5
+
+    def _fmt(x: float) -> str:
+        return format(float(x), ".9g")
+
+    with open(src_path, encoding="utf-8", errors="replace") as fin, open(
+        dst_path, "w", encoding="utf-8", newline="\n"
+    ) as fout:
+        for line in fin:
+            parts = line.split()
+            if len(parts) >= 4 and parts[0] == "v":
+                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                x -= center[0]
+                y -= center[1]
+                z -= center[2]
+                rest = parts[4:] if len(parts) > 4 else []
+                if rest:
+                    fout.write(
+                        "v {} {} {} {}\n".format(
+                            _fmt(x), _fmt(y), _fmt(z), " ".join(rest)
+                        )
+                    )
+                else:
+                    fout.write("v {} {} {}\n".format(_fmt(x), _fmt(y), _fmt(z)))
+            else:
+                fout.write(line.rstrip("\r\n") + "\n")
+    return center
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--exp_dir", type=str, required=True)
     p.add_argument(
         "--force",
         action="store_true",
-        help="Regenerate videos/masks/hy3d symlink even if outputs already exist.",
+        help="Regenerate videos/masks/hy3d aligned obj even if outputs already exist.",
     )
     args = p.parse_args()
     exp_dir = osp.abspath(args.exp_dir)
@@ -65,7 +117,7 @@ def main() -> None:
             and osp.isfile(depth_out)
             and osp.isfile(h5_path)
         )
-        hy_ok = not osp.isfile(src_model) or osp.lexists(dst_align)
+        hy_ok = not osp.isfile(src_model) or osp.isfile(dst_align)
         if core_ok and hy_ok:
             print(f"skip (outputs exist): {work_root} — use --force to regenerate")
             return
@@ -134,8 +186,13 @@ def main() -> None:
     if osp.isfile(src_model):
         if osp.lexists(dst_align) or osp.isfile(dst_align):
             os.remove(dst_align)
-        os.symlink(osp.relpath(src_model, hy_sub), dst_align)
-        print("hy3d template symlink:", dst_align, "->", src_model)
+        center = write_obj_aabb_center_at_origin(src_model, dst_align)
+        print(
+            "hy3d template (AABB center -> origin):",
+            dst_align,
+            f"(shift -[{center[0]:.6f}, {center[1]:.6f}, {center[2]:.6f}]) from",
+            src_model,
+        )
     else:
         print("warning: object/model.obj missing; fp_hy3d_2dir will need cari4d/hy3d_staged layout")
 

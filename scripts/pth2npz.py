@@ -19,8 +19,8 @@ NPZs (``human/human_params_coconet.npz``, ``object/object_params_coconet.npz``) 
 ``pth['pr']`` on the CoCoNet bundle (``--coconet_pth``, or auto-discovered under
 ``cari4d/coconet/**`` when it differs from ``--pth``).
 
-**Pre-CoCoNet init** (``human/human_params_init.npz`` and, with ``--include_init``,
-``object/object_params_init.npz``) must **not** come from a refined checkpoint's ``in`` (that is
+**Pre-CoCoNet init** (``human/human_params_init.npz`` and ``object/object_params_init.npz`` when
+``in`` contains ``pose_abs``) must **not** come from a refined checkpoint's ``in`` (that is
 after CoCoNet). They are taken from ``pth['in']`` on the **CoCoNet** file—i.e. the input stage
 before CoCoNet—using the same resolved CoCoNet path. If you only export a single CoCoNet ``.pth``
 as ``--pth`` (no ``train_state`` in ``pr``), its ``in`` block is used. Optional ``--init_pth``
@@ -46,7 +46,7 @@ Examples::
 
   python exp/pth2npz.py --exp_dir exp/behave_debug/foo \\
     --pth output/coconet/cari4d-release+init_viz_demo/Date03_Sub03_chairblack_lift.pth \\
-    --kid 2 --include_init
+    --kid 2
 """
 
 from __future__ import annotations
@@ -286,11 +286,6 @@ def main() -> None:
         default="",
         help="object_params object_name (default: inferred from seq_name)",
     )
-    parser.add_argument(
-        "--include_init",
-        action="store_true",
-        help="Also write object/object_params_init.npz (needs pre-CoCoNet in; see --coconet_pth / --init_pth)",
-    )
     args = parser.parse_args()
 
     exp_dir = osp.abspath(args.exp_dir)
@@ -399,18 +394,11 @@ def main() -> None:
             intrinsics=intr,
         )
         written.append(hi)
-
-    if args.include_init:
-        if init_raw is None or "in" not in init_raw:
-            raise KeyError(
-                "object_params_init.npz needs pre-CoCoNet pth['in']; use --coconet_pth / --init_pth "
-                "or a single CoCoNet .pth with --pth (non-refined)."
-            )
-        data_in = init_raw["in"]
-        _require_block_keys(data_in, ("pose_abs",), "in (pre-CoCoNet)")
-        oi = osp.join(obj_dir, "object_params_init.npz")
-        write_object_params_npz(oi, data_in["pose_abs"], object_name)
-        written.append(oi)
+        if "pose_abs" in data_in:
+            _require_block_keys(data_in, ("pose_abs",), label)
+            oi = osp.join(obj_dir, "object_params_init.npz")
+            write_object_params_npz(oi, data_in["pose_abs"], object_name)
+            written.append(oi)
 
     print("pth:", pth_path)
     if coconet_path:
