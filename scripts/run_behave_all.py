@@ -25,8 +25,14 @@ def main() -> None:
         print(f"No experiment folders under {behave}", file=sys.stderr)
         sys.exit(1)
 
+    exp_dirs = exp_dirs[1::2]
     for exp in exp_dirs:
         rel = exp.relative_to(root)
+        human_npz = exp / "human" / "human_params.npz"
+        object_npz = exp / "object" / "object_params.npz"
+        if human_npz.is_file() and object_npz.is_file():
+            print(f"==> {rel} (skip: params already exist)", flush=True)
+            continue
         print(f"==> {rel}", flush=True)
         r = subprocess.run(["bash", str(script), str(rel)], cwd=root)
         if r.returncode != 0:

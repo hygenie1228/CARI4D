@@ -117,7 +117,10 @@ def main() -> None:
             and osp.isfile(depth_out)
             and osp.isfile(h5_path)
         )
-        hy_ok = not osp.isfile(src_model) or osp.isfile(dst_align)
+        # isfile() follows symlinks; old *_align.obj symlinks would look "ok" and skip forever.
+        hy_ok = not osp.isfile(src_model) or (
+            osp.isfile(dst_align) and not osp.islink(dst_align)
+        )
         if core_ok and hy_ok:
             print(f"skip (outputs exist): {work_root} — use --force to regenerate")
             return

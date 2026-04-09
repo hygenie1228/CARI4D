@@ -235,6 +235,25 @@ def is_refined_checkpoint_pr(pr: dict) -> bool:
     return "train_state" in pr
 
 
+def all_outputs_exist(exp_dir: str, include_coconet: bool) -> tuple[bool, list[str]]:
+    hum_dir = osp.join(exp_dir, "human")
+    obj_dir = osp.join(exp_dir, "object")
+    expected = [
+        osp.join(hum_dir, "human_params.npz"),
+        osp.join(obj_dir, "object_params.npz"),
+    ]
+    if include_coconet:
+        expected.extend(
+            [
+                osp.join(hum_dir, "human_params_coconet.npz"),
+                osp.join(obj_dir, "object_params_coconet.npz"),
+                osp.join(hum_dir, "human_params_init.npz"),
+                osp.join(obj_dir, "object_params_init.npz"),
+            ]
+        )
+    return all(osp.isfile(p) for p in expected), expected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -291,6 +310,13 @@ def main() -> None:
     exp_dir = osp.abspath(args.exp_dir)
     video_prefix, kid_default = exp_basename_to_video_prefix_and_kid(exp_dir)
     kid = kid_default if args.kid < 0 else args.kid
+    include_coconet = bool(args.coconet_pth.strip())
+    done, expected = all_outputs_exist(exp_dir, include_coconet)
+    if done:
+        print("All output NPZ files already exist. Skip export.")
+        for p in expected:
+            print("exists", p)
+        return
 
     if args.pth.strip():
         pth_path = osp.abspath(args.pth.strip())

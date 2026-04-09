@@ -85,7 +85,8 @@ def get_hy3d_mesh_file(video_prefix, meshes_root='data/behave/selected-views/hy3
     print('using HY3D mesh:', files[0])
     return files[0]
 
-EXCLUDE_OBJECTS = ['boxtiny', 'boxsmall', 'basketball', 'keyboard', 'toolbox', 'yogaball'] # some behave objects that are exlcuded
+# EXCLUDE_OBJECTS = ['boxtiny', 'boxsmall', 'basketball', 'keyboard', 'toolbox', 'yogaball'] # some behave objects that are exlcuded
+EXCLUDE_OBJECTS = [] 
 BEHAVE_ROOT = 'data/behave'
 
 HODOME_VIEW_IDS = [19, 26, 27, 34 ]
