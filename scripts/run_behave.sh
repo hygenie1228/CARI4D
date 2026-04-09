@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-exp_dir="${1:-experiments/behave/Date03_Sub03_backpack_back_0}"
+exp_dir="experiments/debug3/Date03_Sub03_backpack_back_0"
 cari4d="${exp_dir}/cari4d"
 videos_dir="${cari4d}/videos"
 masks_dir="${cari4d}/masks"
@@ -22,20 +22,20 @@ hy3d_mesh="${cari4d}/hy3d_staged/${video_prefix}_export/${video_prefix}_align.ob
 set -e
 mkdir -p "${nlf_dir}" "${nlf_ud_dir}" "${fp_dir}"
 
-# Step 1: exp_dir video.mp4 · processed/* → cari4d/videos/*.color.pkl, depth-reg, masks/*.h5, hy3d_staged
-python scripts/stage_exp_behave.py --exp_dir "${exp_dir}"
+# # Step 1: exp_dir video.mp4 · processed/* → cari4d/videos/*.color.pkl, depth-reg, masks/*.h5, hy3d_staged
+# python scripts/stage_exp_behave.py --exp_dir "${exp_dir}"
 
-# Step 2: run NLF
-python prep/run_nlf_sepK.py --wild_video --data_source behave -o "${nlf_dir}" --masks_root "${masks_dir}" --video "${video}" -tstart 0
+# # Step 2: run NLF
+# python prep/run_nlf_sepK.py --wild_video --data_source behave -o "${nlf_dir}" --masks_root "${masks_dir}" --video "${video}" -tstart 0
 
-# Step 3: align NLF to unidepth prediction
-python prep/align_nlf2unidepth.py --wild_video --data_source behave -tstart 0 -o "${nlf_ud_dir}" --masks_root "${masks_dir}" \
-  --nlf_path "${nlf_dir}" --video "${video}"
+# # Step 3: align NLF to unidepth prediction
+# python prep/align_nlf2unidepth.py --wild_video --data_source behave -tstart 0 -o "${nlf_ud_dir}" --masks_root "${masks_dir}" \
+#   --nlf_path "${nlf_dir}" --video "${video}"
 
-# Step 4: run FoundationPose
-python prep/fp_hy3d_2dir.py --wild_video --viz_path x --vis_thres 0.5 --vis_thres2 0.5 --iou_thres2 0.3 --angular_velo 0.1 --occ_frames_allowed 30 --kid "${cam_id}" -tstart 0 \
-  --masks_root "${masks_dir}" --hy3d_root="${cari4d}/hy3d_staged" \
-  --video "${video}" -o "${fp_dir}"
+# # Step 4: run FoundationPose
+# python prep/fp_hy3d_2dir.py --wild_video --viz_path x --vis_thres 0.5 --vis_thres2 0.5 --iou_thres2 0.3 --angular_velo 0.1 --occ_frames_allowed 30 --kid "${cam_id}" -tstart 0 \
+#   --masks_root "${masks_dir}" --hy3d_root="${cari4d}/hy3d_staged" \
+#   --video "${video}" -o "${fp_dir}"
 
 # Step 5: run CoCoNet
 python run_horefine.py config=learning/configs/cari4d-release.yml split_file=splits/demo-behave.json \
