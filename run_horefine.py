@@ -39,6 +39,56 @@ from lib_smpl import pose156to72, pose72to156, SMPL_ASSETS_ROOT
 import h5py
 
 
+class MP4MaskLoader:
+    def __init__(self, human_mask_mp4: str, object_mask_mp4: str, fps: float = 30.0):
+        self.cap_h = cv2.VideoCapture(human_mask_mp4)
+        self.cap_o = cv2.VideoCapture(object_mask_mp4)
+        if not self.cap_h.isOpened() or not self.cap_o.isOpened():
+            raise RuntimeError(
+                f"failed to open mask videos: human={human_mask_mp4}, object={object_mask_mp4}"
+            )
+        self.fps = float(fps)
+        self._idx = -1
+        self._frame_h = None
+        self._frame_o = None
+
+    def _frame_index_from_time_str(self, frame_time: str) -> int:
+        if isinstance(frame_time, str) and frame_time.startswith("t"):
+            try:
+                t = float(frame_time[1:])
+                return int(round(t * self.fps))
+            except ValueError:
+                pass
+        try:
+            return int(frame_time)
+        except (TypeError, ValueError):
+            raise ValueError(f"unsupported frame_time format: {frame_time}")
+
+    def _read_next(self) -> tuple[np.ndarray, np.ndarray]:
+        ok_h, fh = self.cap_h.read()
+        ok_o, fo = self.cap_o.read()
+        if not ok_h or not ok_o or fh is None or fo is None:
+            raise RuntimeError(f"mask videos ended early at frame index {self._idx + 1}")
+        self._idx += 1
+        self._frame_h = fh
+        self._frame_o = fo
+        return fh, fo
+
+    def get_masks(self, frame_time: str) -> tuple[np.ndarray, np.ndarray]:
+        target_idx = self._frame_index_from_time_str(frame_time)
+        if target_idx < self._idx:
+            raise RuntimeError(
+                f"non-monotonic frame access for mp4 masks: target={target_idx}, current={self._idx}"
+            )
+        while self._idx < target_idx:
+            self._read_next()
+        if self._frame_h is None or self._frame_o is None:
+            self._read_next()
+        mask_h = (cv2.cvtColor(self._frame_h, cv2.COLOR_BGR2GRAY) > 127).astype(np.uint8) * 255
+        mask_o = (cv2.cvtColor(self._frame_o, cv2.COLOR_BGR2GRAY) > 127).astype(np.uint8) * 255
+        return mask_h, mask_o
+
+
 class HORefineRunner(BehaveFPNLFRenderer):
     "refine both human and object"
 
@@ -49,10 +99,21 @@ class HORefineRunner(BehaveFPNLFRenderer):
         args.nodepth = False
         controllers, _ = init_video_controllers(args, args.video, kids)
 
-        # read h5 file
-        h5_path = f'{cfg.masks_root}/{video_prefix}_masks_k{args.cam_id}.h5'
-        print(f'loading masks from {h5_path}')
-        tar_mask = h5py.File(h5_path, 'r')
+        human_mask_mp4 = None
+        object_mask_mp4 = None
+        masks_root = str(getattr(cfg, "masks_root", ""))
+        if "," in masks_root:
+            left, right = masks_root.split(",", 1)
+            if left.strip().lower().endswith(".mp4") and right.strip().lower().endswith(".mp4"):
+                human_mask_mp4 = left.strip()
+                object_mask_mp4 = right.strip()
+        if human_mask_mp4 and object_mask_mp4:
+            print(f'loading masks from mp4: {human_mask_mp4}, {object_mask_mp4}')
+            tar_mask = MP4MaskLoader(human_mask_mp4, object_mask_mp4, fps=float(getattr(args, "fps", 30)))
+        else:
+            h5_path = f'{cfg.masks_root}/{video_prefix}_masks_k{args.cam_id}.h5'
+            print(f'loading masks from {h5_path}')
+            tar_mask = h5py.File(h5_path, 'r')
         return controllers, tar_mask
 
     @torch.no_grad()
@@ -223,7 +284,10 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 frames_used.append(f'{seq_name}/{frame_time}')
                 pose_fp = np.matmul(fp_poses[idx_fp, enum_idx], gt_to_perturb_pose)
 
-                mask_h, mask_o = load_masks(video_prefix, frame_time, kid, tar_mask)
+                if isinstance(tar_mask, MP4MaskLoader):
+                    mask_h, mask_o = tar_mask.get_masks(frame_time)
+                else:
+                    mask_h, mask_o = load_masks(video_prefix, frame_time, kid, tar_mask)
                 if mask_h is None:
                     continue
 
