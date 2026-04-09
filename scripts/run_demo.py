@@ -12,12 +12,14 @@ import json
 import os
 import os.path as osp
 import re
+import shutil
 import subprocess
 import sys
 from typing import List, Tuple
 import tempfile
 
 import h5py
+import joblib
 import numpy as np
 from tqdm import tqdm
 
@@ -198,6 +200,121 @@ def build_masks_h5_from_processed(
         raise RuntimeError("no frames were read from processed mask videos")
 
 
+def build_nlf_from_human_init_npz(
+    human_init_npz: str,
+    fp_all_pkl: str,
+    nlf_params_pkl_out: str,
+) -> dict[str, float]:
+    """Build nlf-style params.pkl + return intrinsics from human init npz."""
+    z = np.load(human_init_npz, allow_pickle=True)
+    required = ["global_orient", "body_pose", "lhand_pose", "rhand_pose", "betas", "trans", "intrinsics"]
+    missing = [k for k in required if k not in z]
+    if missing:
+        raise KeyError(f"missing keys in {human_init_npz}: {missing}")
+
+    go = np.asarray(z["global_orient"], dtype=np.float32)
+    bp = np.asarray(z["body_pose"], dtype=np.float32)
+    lh = np.asarray(z["lhand_pose"], dtype=np.float32)
+    rh = np.asarray(z["rhand_pose"], dtype=np.float32)
+    betas = np.asarray(z["betas"], dtype=np.float32)
+    trans = np.asarray(z["trans"], dtype=np.float32)
+    intr = np.asarray(z["intrinsics"], dtype=np.float64).reshape(-1)
+    if intr.size < 4:
+        raise ValueError(f"invalid intrinsics shape in {human_init_npz}: {intr.shape}")
+
+    poses = np.concatenate([go, bp, lh, rh], axis=1)  # (T, 156)
+    T = poses.shape[0]
+    for name, arr in (("betas", betas), ("trans", trans)):
+        if arr.shape[0] != T:
+            raise ValueError(f"length mismatch: poses={T} but {name}={arr.shape[0]}")
+    if betas.shape[1] != 10 or trans.shape[1] != 3:
+        raise ValueError(f"invalid shapes betas={betas.shape}, trans={trans.shape}")
+
+    fp = joblib.load(fp_all_pkl)
+    fp_frames = list(fp["frames"])
+    if len(fp_frames) != T:
+        Tm = min(len(fp_frames), T)
+        print(f"[human-init] warning: frames mismatch fp={len(fp_frames)} npz={T}; truncating to {Tm}")
+        fp_frames = fp_frames[:Tm]
+        poses = poses[:Tm]
+        betas = betas[:Tm]
+        trans = trans[:Tm]
+
+    out = {
+        "poses": poses[:, None, :].astype(np.float32),
+        "betas": betas[:, None, :].astype(np.float32),
+        "transls": trans[:, None, :].astype(np.float32),
+        "center_pts": np.zeros((poses.shape[0], 1, 3), dtype=np.float32),
+        "center_verts": np.zeros((poses.shape[0], 1, 3), dtype=np.float32),
+        "frames": fp_frames,
+        "gender": z["gender"].item() if "gender" in z else "neutral",
+        "kids": [0],
+    }
+    os.makedirs(osp.dirname(nlf_params_pkl_out), exist_ok=True)
+    joblib.dump(out, nlf_params_pkl_out)
+    return {
+        "fx": float(intr[0]),
+        "fy": float(intr[1]),
+        "cx": float(intr[2]),
+        "cy": float(intr[3]),
+    }
+
+
+def _rotvec_to_matrix(rotvec: np.ndarray) -> np.ndarray:
+    """Convert axis-angle (3,) to rotation matrix (3,3)."""
+    theta = float(np.linalg.norm(rotvec))
+    if theta < 1e-12:
+        return np.eye(3, dtype=np.float32)
+    axis = rotvec / theta
+    x, y, z = float(axis[0]), float(axis[1]), float(axis[2])
+    c = float(np.cos(theta))
+    s = float(np.sin(theta))
+    C = 1.0 - c
+    return np.array(
+        [
+            [x * x * C + c, x * y * C - z * s, x * z * C + y * s],
+            [y * x * C + z * s, y * y * C + c, y * z * C - x * s],
+            [z * x * C - y * s, z * y * C + x * s, z * z * C + c],
+        ],
+        dtype=np.float32,
+    )
+
+
+def build_fp_from_object_init_npz(
+    object_init_npz: str,
+    fp_all_pkl_out: str,
+) -> list[str]:
+    """Build fp-style *_all.pkl from object init npz and return frames list."""
+    z = np.load(object_init_npz, allow_pickle=True)
+    required = ["angle", "trans"]
+    missing = [k for k in required if k not in z]
+    if missing:
+        raise KeyError(f"missing keys in {object_init_npz}: {missing}")
+    angles = np.asarray(z["angle"], dtype=np.float32)
+    trans = np.asarray(z["trans"], dtype=np.float32)
+    if angles.ndim != 2 or angles.shape[1] != 3:
+        raise ValueError(f"invalid angle shape: {angles.shape}")
+    if trans.shape != angles.shape:
+        raise ValueError(f"shape mismatch angle={angles.shape}, trans={trans.shape}")
+    T = angles.shape[0]
+    fp_poses = np.repeat(np.eye(4, dtype=np.float32)[None, None, :, :], T, axis=0)
+    for i in range(T):
+        fp_poses[i, 0, :3, :3] = _rotvec_to_matrix(angles[i])
+        fp_poses[i, 0, :3, 3] = trans[i]
+    frames = [f"{i:06d}" for i in range(T)]
+    out = {
+        "fp_poses": fp_poses,
+        "frames": frames,
+        "fp_poses_all": fp_poses.copy(),
+        "fp_best": np.zeros((T, 1), dtype=np.float32),
+        "visibility": np.ones((T, 1), dtype=np.float32),
+        "vis_thres": 0.0,
+    }
+    os.makedirs(osp.dirname(fp_all_pkl_out), exist_ok=True)
+    joblib.dump(out, fp_all_pkl_out)
+    return frames
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -215,18 +332,23 @@ def main() -> None:
     human_mask_mp4 = osp.join(exp_dir, "processed", "human_mask.mp4")
     object_mask_mp4 = osp.join(exp_dir, "processed", "object_mask.mp4")
     depth_mp4 = osp.join(exp_dir, "processed", "depth.mp4")
-    nlf_ud_dir = osp.join(cari4d, "nlf-2unidepth")
-    fp_dir = osp.join(cari4d, "fp-hy3d3-unidepth")
+    human_init_npz = osp.join(exp_dir, "human", "human_params_init.npz")
+    object_init_npz = osp.join(exp_dir, "object", "object_params_init.npz")
     hy3d_mesh = osp.join(exp_dir, "object", "model.obj")
     video_src = osp.join(exp_dir, "video.mp4")
     tmp_root = osp.join(tempfile.gettempdir(), "cari4d_run_demo", osp.basename(exp_dir))
     videos_dir = osp.join(tmp_root, "videos")
     masks_dir = osp.join(tmp_root, "masks")
+    nlf_dir = osp.join(tmp_root, "nlf-from-human-init")
+    fp_dir = osp.join(tmp_root, "fp-from-object-init")
     video = osp.join(videos_dir, f"{video_prefix}.{cam_id}.color.mp4")
     depth_reg = osp.join(videos_dir, f"{video_prefix}.{cam_id}.depth-reg.mp4")
+    color_pkl = osp.join(videos_dir, f"{video_prefix}.{cam_id}.color.pkl")
     masks_h5 = osp.join(masks_dir, f"{video_prefix}_masks_k{cam_id}.h5")
+    nlf_params_pkl = osp.join(nlf_dir, f"{video_prefix}_params.pkl")
+    fp_all_pkl = osp.join(fp_dir, f"{video_prefix}_all.pkl")
 
-    required_paths = [hy3d_mesh, human_mask_mp4, object_mask_mp4, depth_mp4, fp_dir, nlf_ud_dir, video_src]
+    required_paths = [hy3d_mesh, human_mask_mp4, object_mask_mp4, depth_mp4, human_init_npz, object_init_npz, video_src]
     missing = [p for p in required_paths if not osp.exists(p)]
     if missing:
         print("missing required paths:", file=sys.stderr)
@@ -242,11 +364,21 @@ def main() -> None:
         object_mask_mp4=object_mask_mp4,
         masks_h5_path=masks_h5,
     )
+    build_fp_from_object_init_npz(
+        object_init_npz=object_init_npz,
+        fp_all_pkl_out=fp_all_pkl,
+    )
+    intr = build_nlf_from_human_init_npz(
+        human_init_npz=human_init_npz,
+        fp_all_pkl=fp_all_pkl,
+        nlf_params_pkl_out=nlf_params_pkl,
+    )
     os.makedirs(videos_dir, exist_ok=True)
     for src, dst in ((video_src, video), (depth_mp4, depth_reg)):
         if osp.lexists(dst):
             os.remove(dst)
         os.symlink(src, dst)
+    joblib.dump(intr, color_pkl)
 
     os.makedirs(cari4d, exist_ok=True)
 
@@ -263,15 +395,47 @@ def main() -> None:
         f"hy3d_meshes_root={hy3d_mesh}",
         f"masks_root={masks_dir}",
         f"fp_root={fp_dir}",
-        f"nlf_root={nlf_ud_dir}",
+        f"nlf_root={nlf_dir}",
         f"video={video}",
         f"cam_id={cam_id}",
         f"outpath={cari4d}",
+        f"video_out={cari4d}",
     ]
 
     print("running:")
     print(" ".join(cmd))
     subprocess.run(cmd, check=True, cwd=osp.dirname(osp.dirname(__file__)))
+    save_name = "cari4d-release+step031397_demo"
+    save_dir = osp.join(cari4d, save_name)
+    src_out = osp.join(cari4d, save_name, f"{video_prefix}.pth")
+    dst_out = osp.join(cari4d, "coconet_output.pth")
+    if not osp.isfile(src_out):
+        raise FileNotFoundError(f"expected output missing: {src_out}")
+    if osp.exists(dst_out):
+        os.remove(dst_out)
+    os.replace(src_out, dst_out)
+    if osp.isdir(save_dir):
+        shutil.rmtree(save_dir)
+    print(f"moved output -> {dst_out} (removed {save_dir})")
+    mp4_prefix = f"{save_name}+{video_prefix}_it"
+    copied = 0
+    for fname in os.listdir(cari4d):
+        if not fname.endswith(".mp4"):
+            continue
+        if not fname.startswith(mp4_prefix):
+            continue
+        src_mp4 = osp.join(cari4d, fname)
+        if "_input.mp4" in fname:
+            dst_mp4 = osp.join(cari4d, "coconet_output_input.mp4")
+        else:
+            dst_mp4 = osp.join(cari4d, "coconet_output.mp4")
+        if osp.exists(dst_mp4):
+            os.remove(dst_mp4)
+        os.replace(src_mp4, dst_mp4)
+        copied += 1
+        print(f"renamed video -> {dst_mp4}")
+    if copied == 0:
+        print(f"warning: no mp4 found in {cari4d} with prefix {mp4_prefix}")
 
 
 if __name__ == "__main__":
