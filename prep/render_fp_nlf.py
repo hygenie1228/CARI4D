@@ -59,9 +59,6 @@ class BehaveFPNLFRenderer(BehaveRenderer):
         if args.data_source in ['behave', 'procigen']:
             w2c_rots, w2c_trans = load_kinect_poses_back(
                 osp.join(args.dataset_path, 'calibs', video_prefix.split('_')[0], 'config'), kids)
-        elif args.data_source in ['intercap', 'hodome', 'imhd']:
-            gt_packed = joblib.load(f'data/behave/behave-packed/{video_prefix}_GT-packed.pkl')
-            w2c_rots, w2c_trans = gt_packed['extrinsics'][:, :3, :3], gt_packed['extrinsics'][:, :3, 3]
 
         K_all = [get_intrinsics_unified(args.data_source, video_prefix, kid, args.wild_video) for kid in kids]
         K_all = np.array(K_all)
@@ -101,23 +98,6 @@ class BehaveFPNLFRenderer(BehaveRenderer):
             print(f'{key} created successfully')
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
         vw = imageio.get_writer(outfile.replace('.h5', '.mp4'), 'FFMPEG', fps=4) if args.debug else None
-
-        chunk_size = 30
-
-        # for hy3d and test set, only render specific view, for this we create dummy data for other views
-        if 'hy3d3' in args.fp_root:
-            fp_poses = fp_poses.repeat(len(kids), 1) if fp_poses.shape[
-                                                            1] == 1 else fp_poses  # (N, 1, 4, 4) -> (N, 4, 4, 4)
-            # get the selected view
-            selected_views = json.load(open('splits/selected-views-map.json'))
-            video_prefix = osp.basename(args.video).split('.')[0]
-            if video_prefix not in selected_views and args.data_source == 'behave':
-                raise ValueError(
-                    f'{video_prefix} not in selected_views, please double check!')  # for other data sources, allow to render all views
-            args.camera_ids = [int(selected_views[video_prefix][1])] if args.data_source == 'behave' else kids  # test
-            # no need to repeat NLF as all views are done
-            print("rendering only one view: ", args.camera_ids)
-            print('fp_poses shape: ', fp_poses.shape, 'verts_all shape: ', verts_all.shape)
 
         render_views = kids if not args.use_sel_view else [get_test_view_id(video_prefix)]
         print('render_views: ', render_views)
@@ -260,7 +240,6 @@ class BehaveFPNLFRenderer(BehaveRenderer):
             vw.close()
             print('video saved to', outfile.replace('.h5', '.mp4'))
 
-            
     def load_mesh_tensors(self, args):
         video_prefix = osp.basename(args.video).split('.')[0]
         torch.set_default_tensor_type('torch.FloatTensor')  # fix bug in pytorch3d loading
@@ -289,7 +268,6 @@ class BehaveFPNLFRenderer(BehaveRenderer):
         thetas, betas, smpl_trans = nlf_data['poses'], nlf_data['betas'], nlf_data['transls']
         gender = 'neutral' if 'gender' not in nlf_data else nlf_data['gender']
         smpl_model = get_smpl(gender, hands=True).to(device) # use gender specific model
-        assert 'smplh' in self.args.nlf_path, 'invalid NLF path: {} for SMPLH model!'.format(self.args.nlf_path)
         kids = range(betas.shape[1])  # (T, K, 10)
         betas = nlf_data['betas']
         verts_all = []

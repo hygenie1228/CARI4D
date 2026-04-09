@@ -26,6 +26,7 @@ import imageio
 from lib_smpl import get_smpl, SMPL_MODEL_ROOT, SMPL_ASSETS_ROOT
 from behave_data.behave_video import BaseBehaveVideoData
 from lib_smpl.body_landmark import BodyLandmarks
+from lib_smpl.body_landmark_coco import CocoBodyLandmarks
 
 
 class GlobalSMPLHOptimizer(BaseBehaveVideoData):
@@ -59,11 +60,22 @@ class GlobalSMPLHOptimizer(BaseBehaveVideoData):
         smpl_trans = torch.from_numpy(nlf_transls).float().to(self.device).requires_grad_(True)
         smpl_betas = torch.from_numpy(nlf_betas).float().to(self.device)
 
-        # for body landmarks 
-        self.landmark = BodyLandmarks(SMPL_ASSETS_ROOT)
-       
+        # Load the 2D keypoints
+        pack_file = f'{args.packed_root}/{seq_name}_GT-packed.pkl'
+        pack_data = joblib.load(pack_file)
+        joints_2d = pack_data['joints2d'][:, view_id] # (L, J, 3), J=25 (openpose) or 17 (coco)
+        joints_2d = torch.from_numpy(joints_2d).float().to(self.device)
+        op_thres = 0.4
+
+        # select landmark regressor based on keypoint dimension
+        num_kpts = joints_2d.shape[1]
+        if num_kpts == 17:
+            self.landmark = CocoBodyLandmarks(SMPL_ASSETS_ROOT)
+        else:
+            self.landmark = BodyLandmarks(SMPL_ASSETS_ROOT)
+
         batch_size = min(256, len(smpl_global_pose))
-        total_steps = 1000 
+        total_steps = 1000
         smplh_model = smplx.create(
             model_path=SMPL_MODEL_ROOT,
             model_type='smplh',
@@ -71,14 +83,7 @@ class GlobalSMPLHOptimizer(BaseBehaveVideoData):
             use_pca=False,
             batch_size=batch_size,
             flat_hand_mean=True # the given hands are directly in the axis angle format
-        ).to(self.device)
-
-        # Load the 2D keypoints 
-        pack_file = f'{args.packed_root}/{seq_name}_GT-packed.pkl'
-        pack_data = joblib.load(pack_file)
-        joints_2d = pack_data['joints2d'][:, view_id] # (L, 25, 3) 
-        joints_2d = torch.from_numpy(joints_2d).float().to(self.device)
-        op_thres = 0.4 
+        ).to(self.device) 
         assert len(joints_2d) == len(smpl_global_pose), f'the number of 2d joints does not match the number of frames: {len(joints_2d)} != {len(smpl_global_pose)}'
 
         # do optimization 

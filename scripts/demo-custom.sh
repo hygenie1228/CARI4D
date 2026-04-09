@@ -37,11 +37,11 @@ python prep/align_monod2hum.py --wild_video --nlf_path ${nlf_path}-opt \
 # Update the video path, pointing to the new video with aligned depth. 
 video=${video_dir}-aligned/${video_prefix}.0.color.mp4 
 
-# Step 5: estimate metric scale of the object 
+# Step 5.1: estimate metric scale of the object 
 python tools/estimate_scale_video.py --wild_video --video ${video} --masks_root ${masks_root} --hy3d_root ${hy3d_root} -o ${hy3d_root}-metric
 
 
-# Step 5: run FP in tracking mode
+# Step 5.2: run FP in tracking mode
 python prep/fp_hy3d_track.py --viz_path x --wild_video --kid 0 \
 --masks_root ${masks_root} --hy3d_root=${hy3d_root}-metric \
 --video ${video} -o ${fp_root}

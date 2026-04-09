@@ -17,6 +17,8 @@ Authors: Xianghui Xie, Bowen Wen, Yan Chang, Hesam Rabeti, Jiefeng Li, Ye Yuan, 
 
 
 ## Updates
+- April 04, data preprocessing for custom videos released. 
+- April 04, training code released. 
 - Feb 28, 2026, code released. 
 - Dec 16, 2025, ArXiv released.
 
@@ -24,7 +26,7 @@ Authors: Xianghui Xie, Bowen Wen, Yan Chang, Hesam Rabeti, Jiefeng Li, Ye Yuan, 
 - [x] Demo on internet video. 
 - [x] Demo on BEHAVE video.
 - [x] Evaluation on BEHAVE dataset. 
-- [ ] Example training.
+- [x] Example training.
 
 ## Installation
 
@@ -103,6 +105,14 @@ We provide additional files to support easy reproduction of the results on BEHAV
 - Reconstructed object meshes, download [here](https://huggingface.co/nvidia/CARI4D/blob/main/behave-recon-meshes.zip) and place them under `data/cari4d-demo/meshes`.  
 - Openpose predictions, download [here](https://huggingface.co/nvidia/CARI4D/blob/main/behave-test-openpose.zip) and place them under `data/cari4d-demo/behave/packed`.
 - `splits/selected-views-map.json` provides the camera view of each sequence we used to report test performance. 
+
+
+## Training
+Download example data from [here](https://huggingface.co/nvidia/CARI4D/blob/main/train-demo.zip) and then do `unzip train-demo.zip -d data/train`. Please check [this doc](./docs/train.md) for more details of how to prepare the training data. 
+Example training command: 
+```bash
+accelerate launch --num_processes=8 learning/training/trainer.py config=learning/configs/cari4d-release.yml split_file=splits/demo-behave.json exp_name=cari4d-train
+```
 
 
 ## Acknowledgements
