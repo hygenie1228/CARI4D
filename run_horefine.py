@@ -8,6 +8,7 @@
 
 import json
 import os, sys
+import re
 
 sys.path.append(os.getcwd())
 
@@ -138,6 +139,13 @@ class HORefineRunner(BehaveFPNLFRenderer):
     def run_1seq(self, args, cfg, evaluator, trainer, errors_all, frames_all):
         device = 'cuda'
         video_prefix = osp.basename(args.video).split('.')[0]
+        if video_prefix == "video":
+            # Support staged experiments where input is exp_dir/video.mp4.
+            # Derive seq name from exp_dir basename: <seq>_<kid> -> <seq>.
+            exp_base = osp.basename(osp.dirname(args.video.rstrip("/")))
+            m = re.match(r"^(.+)_(\d+)$", exp_base)
+            if m:
+                video_prefix = m.group(1)
         seq_name = video_prefix
         save_name = evaluator.get_save_name(cfg, trainer)
         pth_file = f'{cfg.outpath}/{save_name}/{seq_name}.pth'
