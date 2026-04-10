@@ -155,8 +155,10 @@ def _compute_human_joints(poses: np.ndarray, betas: np.ndarray, trans: np.ndarra
 def _write_support_files(
     exp_dir: str,
     seq_name: str,
-    human: dict,
-    obj: dict,
+    human_init: dict,
+    obj_init: dict,
+    human_sup: dict,
+    obj_sup: dict,
     n_frames: int,
 ) -> PreparedPaths:
     data_root = osp.join(exp_dir, "data")
@@ -169,24 +171,24 @@ def _write_support_files(
         os.makedirs(d, exist_ok=True)
 
     frames = [f"{i:06d}" for i in range(n_frames)]
-    # NLF params (use GT as initialization for simplicity).
+    # NLF/FP initial states should come from init npz.
     nlf = {
-        "poses": human["poses"][:, None, :].astype(np.float32),
-        "betas": human["betas"][:, None, :].astype(np.float32),
-        "transls": human["trans"][:, None, :].astype(np.float32),
+        "poses": human_init["poses"][:, None, :].astype(np.float32),
+        "betas": human_init["betas"][:, None, :].astype(np.float32),
+        "transls": human_init["trans"][:, None, :].astype(np.float32),
         "center_pts": np.zeros((n_frames, 1, 3), dtype=np.float32),
         "center_verts": np.zeros((n_frames, 1, 3), dtype=np.float32),
         "frames": frames,
-        "gender": human["gender"],
+        "gender": human_init["gender"],
         "kids": [0],
     }
     joblib.dump(nlf, osp.join(nlf_root, f"{seq_name}_params.pkl"))
 
-    # FP all.pkl from object GT.
+    # FP initialization from object init npz.
     fp_poses = np.repeat(np.eye(4, dtype=np.float32)[None, None, :, :], n_frames, axis=0)
     for i in range(n_frames):
-        fp_poses[i, 0, :3, :3] = _rotvec_to_matrix(obj["angle"][i])
-        fp_poses[i, 0, :3, 3] = obj["trans"][i]
+        fp_poses[i, 0, :3, :3] = _rotvec_to_matrix(obj_init["angle"][i])
+        fp_poses[i, 0, :3, 3] = obj_init["trans"][i]
     fp = {
         "fp_poses": fp_poses,
         "frames": frames,
@@ -197,13 +199,16 @@ def _write_support_files(
     }
     joblib.dump(fp, osp.join(fp_root, f"{seq_name}_all.pkl"))
 
-    joints_body, joints_smpl = _compute_human_joints(human["poses"], human["betas"], human["trans"], human["gender"])
+    # Packed supervision should stay on GT labels for training loss.
+    joints_body, joints_smpl = _compute_human_joints(
+        human_sup["poses"], human_sup["betas"], human_sup["trans"], human_sup["gender"]
+    )
     packed = {
-        "obj_angles": obj["angle"].astype(np.float32),
-        "obj_trans": obj["trans"].astype(np.float32),
-        "poses": human["poses"].astype(np.float32),
-        "trans": human["trans"].astype(np.float32),
-        "betas": human["betas"].astype(np.float32),
+        "obj_angles": obj_sup["angle"].astype(np.float32),
+        "obj_trans": obj_sup["trans"].astype(np.float32),
+        "poses": human_sup["poses"].astype(np.float32),
+        "trans": human_sup["trans"].astype(np.float32),
+        "betas": human_sup["betas"].astype(np.float32),
         "joints_body": joints_body.astype(np.float32),
         "joints_smpl": joints_smpl.astype(np.float32),
         "frames": frames,
@@ -590,6 +595,7 @@ def prepare_data(
     max_frames: int,
     input_size: int,
     simple_render: bool,
+    force_rebuild: bool = False,
 ) -> PreparedPaths:
     seq_name, _ = parse_exp_dir(exp_dir)
     data_root = osp.join(exp_dir, "data")
@@ -608,10 +614,12 @@ def prepare_data(
         osp.join(existing_paths.nlf_root, f"{seq_name}_params.pkl"),
         osp.join(existing_paths.fp_root, f"{seq_name}_all.pkl"),
     ]
-    if osp.isdir(data_root) and all(osp.isfile(p) for p in required_prepared):
+    if (not force_rebuild) and osp.isdir(data_root) and all(osp.isfile(p) for p in required_prepared):
         print(f"[prepare] existing data found at {data_root}; skip rebuild.")
         print(f"[prepare] render={osp.join(existing_paths.render_root, f'{seq_name}_render.h5')}")
         return existing_paths
+    if force_rebuild:
+        print("[prepare] force_rebuild=True; rebuilding prepared data.")
 
     video_path = osp.join(exp_dir, "video.mp4")
     human_mask_path = osp.join(exp_dir, "processed", "human_mask.mp4")
@@ -623,14 +631,26 @@ def prepare_data(
     )
     print(f"[prepare] sequence={seq_name}, frames={n_frames}")
 
-    human = _load_human_gt(human_gt_npz, n_frames)
-    obj = _load_object_gt(object_gt_npz, n_frames)
-    paths = _write_support_files(exp_dir, seq_name, human, obj, n_frames)
+    # `human_gt_npz` / `object_gt_npz` here are treated as initialization inputs.
+    human_init = _load_human_gt(human_gt_npz, n_frames)
+    obj_init = _load_object_gt(object_gt_npz, n_frames)
+    # Loss supervision should prefer GT labels if available.
+    human_sup_npz = osp.join(exp_dir, "human", "human_params_gt.npz")
+    object_sup_npz = osp.join(exp_dir, "object", "object_params_gt.npz")
+    if osp.isfile(human_sup_npz) and osp.isfile(object_sup_npz):
+        human_sup = _load_human_gt(human_sup_npz, n_frames)
+        obj_sup = _load_object_gt(object_sup_npz, n_frames)
+        print(f"[prepare] supervision labels: GT ({human_sup_npz}, {object_sup_npz})")
+    else:
+        human_sup = human_init
+        obj_sup = obj_init
+        print("[prepare] warning: GT supervision npz missing; fallback to init labels.")
+    paths = _write_support_files(exp_dir, seq_name, human_init, obj_init, human_sup, obj_sup, n_frames)
     _write_render_h5(
         exp_dir=exp_dir,
         paths=paths,
         fp_all_pkl=osp.join(paths.fp_root, f"{seq_name}_all.pkl"),
-        intrinsics=human["intrinsics"],
+        intrinsics=human_init["intrinsics"],
         n_frames=n_frames,
         input_size=input_size,
         simple_render=simple_render,
@@ -695,8 +715,9 @@ def run_finetune(
 
     save_dir = osp.join(exp_dir, "data", "finetune_ckpts")
     os.makedirs(save_dir, exist_ok=True)
-    exp_name = f"{paths.seq_name}-finetune"
-    train_exp_dir = osp.join(save_dir, exp_name)
+    # Keep all training artifacts directly under finetune_ckpts/
+    exp_name = "."
+    train_exp_dir = save_dir
     os.makedirs(train_exp_dir, exist_ok=True)
 
     # Default behavior: resume from the latest step checkpoint if it exists.
@@ -748,23 +769,45 @@ def run_finetune(
     subprocess.run(cmd, check=True, cwd=ROOT)
 
 
-def export_finetune_visualization(exp_dir: str, paths: PreparedPaths) -> None:
+def export_finetune_visualization(exp_dir: str, paths: PreparedPaths, ckpt_file: str | None = None) -> None:
     seq_name, cam_id = parse_exp_dir(exp_dir)
-    train_exp_dir = osp.join(exp_dir, "coconet", f"{seq_name}-finetune")
-    step_ckpts = sorted(
-        [
-            osp.join(train_exp_dir, name)
-            for name in os.listdir(train_exp_dir)
-            if re.match(r"^step\d+\.pth$", name)
-        ]
-    ) if osp.isdir(train_exp_dir) else []
-    if not step_ckpts:
-        print(f"[viz] skip: no step checkpoint found in {train_exp_dir}")
-        return
-    ckpt_file = step_ckpts[-1]
+    default_save_dir = osp.join(exp_dir, "data", "finetune_ckpts")
+    default_exp_name = "."
+    if ckpt_file is None:
+        # Prefer finetune output path used by this script.
+        train_exp_dir = default_save_dir
+        step_ckpts = (
+            sorted(
+                [
+                    osp.join(train_exp_dir, name)
+                    for name in os.listdir(train_exp_dir)
+                    if re.match(r"^step\d+\.pth$", name)
+                ]
+            )
+            if osp.isdir(train_exp_dir)
+            else []
+        )
+        # Backward compatibility: older runs may have used exp_dir/coconet.
+        if not step_ckpts:
+            legacy_train_exp_dir = osp.join(exp_dir, "coconet", f"{seq_name}-finetune")
+            step_ckpts = (
+                sorted(
+                    [
+                        osp.join(legacy_train_exp_dir, name)
+                        for name in os.listdir(legacy_train_exp_dir)
+                        if re.match(r"^step\d+\.pth$", name)
+                    ]
+                )
+                if osp.isdir(legacy_train_exp_dir)
+                else []
+            )
+        if not step_ckpts:
+            print(f"[viz] skip: no step checkpoint found in {train_exp_dir}")
+            return
+        ckpt_file = step_ckpts[-1]
 
-    cari4d = osp.join(exp_dir, "cari4d")
-    os.makedirs(cari4d, exist_ok=True)
+    vis_dir = osp.join(default_save_dir, "vis")
+    os.makedirs(vis_dir, exist_ok=True)
     human_mask_mp4 = osp.join(exp_dir, "processed", "human_mask.mp4")
     object_mask_mp4 = osp.join(exp_dir, "processed", "object_mask.mp4")
     depth_mp4 = osp.join(exp_dir, "processed", "depth.mp4")
@@ -790,6 +833,30 @@ def export_finetune_visualization(exp_dir: str, paths: PreparedPaths) -> None:
             os.remove(dst)
         os.symlink(osp.abspath(src), dst)
 
+    # Force fresh visualization run: remove stale outputs that trigger skip logic.
+    removed_stale = 0
+    for root, _, files in os.walk(vis_dir):
+        for fname in files:
+            if fname.endswith(".pth") or fname.endswith(".mp4"):
+                stale_path = osp.join(root, fname)
+                try:
+                    os.remove(stale_path)
+                    removed_stale += 1
+                except OSError:
+                    pass
+    if removed_stale > 0:
+        print(f"[viz] removed {removed_stale} stale visualization files from {vis_dir}")
+
+    # Keep TensorBoard/wandb artifacts for viz runs inside finetune experiment dir,
+    # instead of defaulting to experiments/cari4d-release.
+    save_dir_for_viz = default_save_dir
+    exp_name_for_viz = default_exp_name
+    ckpt_parent = osp.dirname(ckpt_file)
+    ckpt_grandparent = osp.dirname(ckpt_parent)
+    if osp.abspath(ckpt_grandparent) == osp.abspath(default_save_dir):
+        save_dir_for_viz = ckpt_grandparent
+        exp_name_for_viz = osp.basename(ckpt_parent)
+
     cmd = [
         sys.executable,
         "run_horefine.py",
@@ -805,9 +872,11 @@ def export_finetune_visualization(exp_dir: str, paths: PreparedPaths) -> None:
         f"nlf_root={paths.nlf_root}",
         f"video={color_mp4}",
         f"cam_id={cam_id}",
-        f"outpath={cari4d}",
-        f"video_out={cari4d}",
+        f"outpath={vis_dir}",
+        f"video_out={vis_dir}",
         f"ckpt_file={ckpt_file}",
+        f"save_dir={save_dir_for_viz}",
+        f"exp_name={exp_name_for_viz}",
         "no_wandb=True",
         "job=test-only",
         "identifier=_finetune",
@@ -821,23 +890,28 @@ def export_finetune_visualization(exp_dir: str, paths: PreparedPaths) -> None:
         return
 
     copied = 0
-    for fname in os.listdir(cari4d):
+    for fname in os.listdir(vis_dir):
         if not fname.endswith(".mp4"):
             continue
-        src_mp4 = osp.join(cari4d, fname)
+        src_mp4 = osp.join(vis_dir, fname)
         if osp.getmtime(src_mp4) < before_ts:
             continue
         if "_input.mp4" in fname:
-            dst_mp4 = osp.join(exp_dir, "after_finetuning_input.mp4")
+            dst_mp4 =  osp.join(exp_dir, "finetuning_input.mp4")
+            if osp.exists(dst_mp4):
+                os.remove(dst_mp4)
+            os.replace(src_mp4, dst_mp4)
+            copied += 1
+            print(f"[viz] renamed video -> {dst_mp4}")
         else:
-            dst_mp4 = osp.join(exp_dir, "after_finetuning.mp4")
-        if osp.exists(dst_mp4):
-            os.remove(dst_mp4)
-        os.replace(src_mp4, dst_mp4)
-        copied += 1
-        print(f"[viz] renamed video -> {dst_mp4}")
+            dst_mp4 =  osp.join(exp_dir, "finetuning_output.mp4")
+            if osp.exists(dst_mp4):
+                os.remove(dst_mp4)
+            os.replace(src_mp4, dst_mp4)
+            copied += 1
+            print(f"[viz] renamed video -> {dst_mp4}")
     if copied == 0:
-        print(f"[viz] warning: no new mp4 found in {cari4d}")
+        print(f"[viz] warning: no new mp4 found in {vis_dir}")
 
 
 def main() -> None:
@@ -857,20 +931,32 @@ def main() -> None:
         action="store_true",
         help="Legacy render.h5: no depth video, no SMPL+obj live render (placeholder input xyz).",
     )
+    parser.add_argument(
+        "--force_rebuild",
+        action="store_true",
+        help="Rebuild prepared data even if exp_dir/data already exists.",
+    )
     args = parser.parse_args()
 
     exp_dir = osp.abspath(args.exp_dir)
     base_ckpt = osp.abspath(args.base_ckpt)
-    human_gt_npz = (
-        osp.abspath(args.human_gt_npz)
-        if args.human_gt_npz
-        else osp.join(exp_dir, "human", "human_params_gt.npz")
-    )
-    object_gt_npz = (
-        osp.abspath(args.object_gt_npz)
-        if args.object_gt_npz
-        else osp.join(exp_dir, "object", "object_params_gt.npz")
-    )
+    if args.human_gt_npz:
+        human_gt_npz = osp.abspath(args.human_gt_npz)
+    else:
+        human_init = osp.join(exp_dir, "human", "human_params_init.npz")
+        human_gt = osp.join(exp_dir, "human", "human_params_gt.npz")
+        human_gt_npz = human_init if osp.isfile(human_init) else human_gt
+        if human_gt_npz == human_gt:
+            print(f"[prepare] warning: init missing, fallback to GT: {human_gt_npz}")
+
+    if args.object_gt_npz:
+        object_gt_npz = osp.abspath(args.object_gt_npz)
+    else:
+        object_init = osp.join(exp_dir, "object", "object_params_init.npz")
+        object_gt = osp.join(exp_dir, "object", "object_params_gt.npz")
+        object_gt_npz = object_init if osp.isfile(object_init) else object_gt
+        if object_gt_npz == object_gt:
+            print(f"[prepare] warning: init missing, fallback to GT: {object_gt_npz}")
     required = [base_ckpt, human_gt_npz, object_gt_npz, osp.join(exp_dir, "video.mp4")]
     missing = [p for p in required if not osp.exists(p)]
     if missing:
@@ -879,6 +965,7 @@ def main() -> None:
             print(f" - {p}", file=sys.stderr)
         sys.exit(1)
 
+    force_rebuild = args.force_rebuild or (args.num_epochs <= 0)
     paths = prepare_data(
         exp_dir=exp_dir,
         human_gt_npz=human_gt_npz,
@@ -886,9 +973,14 @@ def main() -> None:
         max_frames=args.max_frames,
         input_size=args.input_size,
         simple_render=args.simple_render,
+        force_rebuild=force_rebuild,
     )
     if args.prepare_only:
         print("[done] prepare_only=True, skipping trainer launch.")
+        return
+    if args.num_epochs <= 0:
+        print("[train] num_epochs<=0, skipping finetuning and exporting visualization from base checkpoint.")
+        export_finetune_visualization(exp_dir=exp_dir, paths=paths, ckpt_file=base_ckpt)
         return
     run_finetune(
         exp_dir=exp_dir,

@@ -419,6 +419,7 @@ def main() -> None:
     print(f"moved output -> {dst_out} (removed {save_dir})")
     mp4_prefix = f"{save_name}+{video_prefix}_it"
     copied = 0
+    
     for fname in os.listdir(coconet_dir):
         if not fname.endswith(".mp4"):
             continue
@@ -426,14 +427,19 @@ def main() -> None:
             continue
         src_mp4 = osp.join(coconet_dir, fname)
         if "_input.mp4" in fname:
-            dst_mp4 = osp.join(coconet_dir, "coconet_output_input.mp4")
+            dst_mp4 = osp.join(exp_dir, "coconet_input.mp4")
+            if osp.exists(dst_mp4):
+                os.remove(dst_mp4)
+            os.replace(src_mp4, dst_mp4)
+            copied += 1
+            print(f"renamed video -> {dst_mp4}")
         else:
-            dst_mp4 = osp.join(coconet_dir, "coconet_output.mp4")
-        if osp.exists(dst_mp4):
-            os.remove(dst_mp4)
-        os.replace(src_mp4, dst_mp4)
-        copied += 1
-        print(f"renamed video -> {dst_mp4}")
+            dst_mp4 = osp.join(exp_dir, "coconet_output.mp4")
+            if osp.exists(dst_mp4):
+                os.remove(dst_mp4)
+            os.replace(src_mp4, dst_mp4)
+            copied += 1
+            print(f"renamed video -> {dst_mp4}")
     if copied == 0:
         print(f"warning: no mp4 found in {coconet_dir} with prefix {mp4_prefix}")
 
