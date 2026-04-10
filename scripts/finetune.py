@@ -869,6 +869,7 @@ def export_finetune_visualization(
         "data_name=test-only",
         f"hy3d_meshes_root={hy3d_mesh}",
         f"masks_root={human_mask_mp4},{object_mask_mp4}",
+        f"packed_root={paths.packed_root}",
         f"fp_root={paths.fp_root}",
         f"nlf_root={paths.nlf_root}",
         f"video={color_mp4}",

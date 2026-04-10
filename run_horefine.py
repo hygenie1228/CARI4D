@@ -199,15 +199,24 @@ class HORefineRunner(BehaveFPNLFRenderer):
         
         nlf_data = joblib.load(f'{cfg.nlf_root}/{video_prefix}_params.pkl')
 
-        # prepare dummy GT data
-        packed = {}
-        packed['obj_angles'] = R.from_matrix(np.eye(3)).as_rotvec()[None].repeat(len(nlf_data['poses']), 0)
-        packed['obj_trans'] = np.zeros((len(nlf_data['poses']), 3))
-        # convert from (T, K...) to (T,...)
-        packed['poses'] = nlf_data['poses'][:, 0].copy()
-        packed['betas'] = nlf_data['betas'][:, 0].copy()
-        packed['trans'] = nlf_data['transls'][:, 0].copy()
-        packed['frames'] = nlf_data['frames']
+        # Prefer true GT packed labels when available.
+        packed = None
+        packed_root = getattr(cfg, "packed_root", None)
+        if packed_root:
+            packed_file = osp.join(packed_root, f"{seq_name}_GT-packed.pkl")
+            if osp.isfile(packed_file):
+                packed = joblib.load(packed_file)
+                print(f"loaded GT packed labels from {packed_file}")
+        if packed is None:
+            # Fallback: derive pseudo-GT from fp/nlf.
+            packed = {}
+            packed['obj_angles'] = R.from_matrix(fp_poses[:, enum_idx, :3, :3]).as_rotvec().astype(np.float32)
+            packed['obj_trans'] = fp_poses[:, enum_idx, :3, 3].astype(np.float32)
+            # convert from (T, K...) to (T,...)
+            packed['poses'] = nlf_data['poses'][:, 0].copy()
+            packed['betas'] = nlf_data['betas'][:, 0].copy()
+            packed['trans'] = nlf_data['transls'][:, 0].copy()
+            packed['frames'] = fp_frames
         
         frames_packed = packed['frames']
         # take the frames as the joint set
@@ -222,6 +231,10 @@ class HORefineRunner(BehaveFPNLFRenderer):
         # Write visualization video: overlay front-view rendering on input RGB
         out_root = cfg.video_out
         os.makedirs(out_root, exist_ok=True)
+        if getattr(cfg, "hy3d_meshes_root", None):
+            exp_root = osp.dirname(osp.dirname(osp.abspath(cfg.hy3d_meshes_root)))
+        else:
+            exp_root = osp.dirname(args.video.rstrip("/"))
         save_name = evaluator.get_save_name(cfg, trainer)
         out_path = osp.join(out_root, f'{save_name}+{seq_name}_it{cfg.refine_iters}.mp4')
         vw = imageio.get_writer(out_path, fps=30)
@@ -237,6 +250,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
         if vis_input:
             out_path = osp.join(out_root, f'{save_name}+{seq_name}_it{cfg.refine_iters}_input.mp4')
             vw_input = imageio.get_writer(out_path, fps=15)
+        iou_debug_saved = False
         for start in tqdm(range(0, len(frames_packed), clip_len)):
             end = min(start + clip_len, len(frames_packed))
             if end - start < clip_len:
@@ -591,8 +605,14 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 transl_gt = packed['obj_trans'][start:end].astype(np.float32)
                 R_obj = torch.from_numpy(R.from_rotvec(angles_gt).as_matrix()).to(device).float()  # (T, 3, 3)
                 t_world = torch.from_numpy(transl_gt).to(device).float()  # (T, 3)
-                obj_verts_gt = torch.matmul(obj_base_centered[None].expand(end - start, -1, -1),
-                                            R_obj.permute(0, 2, 1)) + t_world[:, None]
+                R_wc_t = torch.from_numpy(w2c_rots[enum_idx]).to(device).float()
+                t_wc_t = torch.from_numpy(w2c_trans[enum_idx]).to(device).float()
+                R_cam = torch.matmul(R_wc_t[None].expand(end - start, -1, -1), R_obj)
+                t_cam = torch.matmul(t_world, R_wc_t.T) + t_wc_t
+                obj_verts_gt = torch.matmul(
+                    obj_base_centered[None].expand(end - start, -1, -1),
+                    R_cam.permute(0, 2, 1),
+                ) + t_cam[:, None]
                 verts_comb_gt = torch.cat([vs_gt_world, obj_verts_gt], dim=1)
                 _, rend_gt, rend_gt_side, _ = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_gt)
 
@@ -612,6 +632,22 @@ class HORefineRunner(BehaveFPNLFRenderer):
                     if not cfg.wild_video:
                         gt_comb = self.comb_front_side(color, rend_gt[j], rend_gt_side[j])
                         combs.append(gt_comb)
+                        # Validate GT side-view alignment (row2 col3 vs row2 col4).
+                        h0, w0 = color.shape[:2]
+                        x1, x2 = int(w0 * 0.15), int(w0 * 0.85)
+                        y1, y2 = int(h0 * 0.15), int(h0 * 1.0)
+                        pr_side = rend_pr_side[j][y1:y2, x1:x2]
+                        gt_side = rend_gt_side[j][y1:y2, x1:x2]
+                        # if not iou_debug_saved:
+                        #     imageio.imwrite(osp.join(exp_root, "debug_row2_col3_pred_side.png"), pr_side)
+                        #     imageio.imwrite(osp.join(exp_root, "debug_row2_col4_gt_side.png"), gt_side)
+                        #     iou_debug_saved = True
+                        # pr_mask = pr_side.sum(axis=-1) > 0
+                        # gt_mask = gt_side.sum(axis=-1) > 0
+                        # union = np.logical_or(pr_mask, gt_mask).sum()
+                        # iou = 0.0 if union == 0 else float(np.logical_and(pr_mask, gt_mask).sum() / union)
+                        # assert iou > 0.5, f"GT render alignment check failed: IoU={iou:.4f} at frame {frame_time}"
+                        # assert 0 
                     comb = np.concatenate(combs, axis=1)
                     cv2.putText(comb, frame_time+ f' idx {j+start}', (comb.shape[1] // 4, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
                                 (0, 255, 255), 2)

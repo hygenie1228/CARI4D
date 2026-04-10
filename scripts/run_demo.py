@@ -341,6 +341,7 @@ def main() -> None:
     masks_dir = osp.join(tmp_root, "masks")
     nlf_dir = osp.join(tmp_root, "nlf-from-human-init")
     fp_dir = osp.join(tmp_root, "fp-from-object-init")
+    packed_root = osp.join(exp_dir, "data", "packed")
     video = osp.join(videos_dir, f"{video_prefix}.{cam_id}.color.mp4")
     depth_reg = osp.join(videos_dir, f"{video_prefix}.{cam_id}.depth-reg.mp4")
     color_pkl = osp.join(videos_dir, f"{video_prefix}.{cam_id}.color.pkl")
@@ -394,6 +395,7 @@ def main() -> None:
         "data_name=test-only",
         f"hy3d_meshes_root={hy3d_mesh}",
         f"masks_root={masks_dir}",
+        f"packed_root={packed_root}",
         f"fp_root={fp_dir}",
         f"nlf_root={nlf_dir}",
         f"video={video}",
@@ -442,6 +444,8 @@ def main() -> None:
             print(f"renamed video -> {dst_mp4}")
     if copied == 0:
         print(f"warning: no mp4 found in {coconet_dir} with prefix {mp4_prefix}")
+        return
+
 
 
 if __name__ == "__main__":
