@@ -246,7 +246,7 @@ class VideoDataset(Dataset):
             self.smpl_female = self.smpl_female.to('cpu')
         
         # load symmetry info 
-        symm_info = joblib.load('assets/behave-symmetries.pkl')
+        symm_info = joblib.load('data/assets/behave-symmetries.pkl')
         self.max_symms = max([len(v) for k, v in symm_info.items()]) # maximum number of symmetries for any object
         symm_full = {}
         # for objects with less symmetries, fill with identity matrix
@@ -581,10 +581,11 @@ class VideoDataset(Dataset):
             mask_render_full = np.mean(rgb_render, -1) > 0.01
             assert ('mask_o' in render_data) | ('fp+smpl' not in self.render_h5_root), 'incorrect data format!'
             if 'mask_o' in render_data:
-                mask_render_obj = render_data['mask_o']
+                mask_render_obj = np.asarray(render_data['mask_o'], dtype=np.float32)
                 if len(mask_render_obj.shape) == 3:
                     mask_render_obj = mask_render_obj[:, :, 0]  # keep only the object mask
-                mask_render_hum = mask_render_full & (~mask_render_obj)  # subtract obj mask
+                obj_fg = mask_render_obj > 0.5  # float masks from mesh render cannot use bitwise ~
+                mask_render_hum = mask_render_full & (~obj_fg)  # subtract obj mask
             else:
                 # no human render
                 mask_render_obj = mask_render_full

@@ -217,6 +217,8 @@ class Trainer(object):
                 avg_loss = total_loss / len(train_dataloader)
                 accelerator.print(f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss: {avg_loss:.4f} ---")
             train_state.epoch += 1
+        if accelerator.is_main_process:
+            self.save_checkpoint(accelerator, cfg, model, optimizer, scheduler, train_state)
         accelerator.print("Training complete!")
 
     def save_checkpoint(self, accelerator, cfg, model, optimizer, scheduler, train_state):
