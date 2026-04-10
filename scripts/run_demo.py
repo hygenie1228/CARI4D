@@ -315,6 +315,68 @@ def build_fp_from_object_init_npz(
     return frames
 
 
+def build_packed_from_gt_npz(
+    human_gt_npz: str,
+    object_gt_npz: str,
+    nlf_params_pkl: str,
+    fp_all_pkl: str,
+    packed_pkl_out: str,
+) -> None:
+    """Build minimal GT-packed.pkl for GT rendering in run_horefine."""
+    hz = np.load(human_gt_npz, allow_pickle=True)
+    oz = np.load(object_gt_npz, allow_pickle=True)
+    req_h = ["global_orient", "body_pose", "lhand_pose", "rhand_pose", "betas", "trans"]
+    req_o = ["angle", "trans"]
+    miss_h = [k for k in req_h if k not in hz]
+    miss_o = [k for k in req_o if k not in oz]
+    if miss_h:
+        raise KeyError(f"missing keys in {human_gt_npz}: {miss_h}")
+    if miss_o:
+        raise KeyError(f"missing keys in {object_gt_npz}: {miss_o}")
+
+    poses = np.concatenate(
+        [
+            np.asarray(hz["global_orient"], dtype=np.float32),
+            np.asarray(hz["body_pose"], dtype=np.float32),
+            np.asarray(hz["lhand_pose"], dtype=np.float32),
+            np.asarray(hz["rhand_pose"], dtype=np.float32),
+        ],
+        axis=1,
+    )
+    betas = np.asarray(hz["betas"], dtype=np.float32)
+    htrans = np.asarray(hz["trans"], dtype=np.float32)
+    oang = np.asarray(oz["angle"], dtype=np.float32)
+    otrans = np.asarray(oz["trans"], dtype=np.float32)
+
+    nlf = joblib.load(nlf_params_pkl)
+    fp = joblib.load(fp_all_pkl)
+    t_all = [
+        poses.shape[0],
+        betas.shape[0],
+        htrans.shape[0],
+        oang.shape[0],
+        otrans.shape[0],
+        len(nlf["frames"]),
+        len(fp["frames"]),
+    ]
+    T = min(t_all)
+    if T <= 0:
+        raise RuntimeError("invalid GT packed length")
+    if len(set(t_all)) != 1:
+        print(f"[packed-gt] warning: length mismatch {t_all}; truncating to {T}")
+
+    out = {
+        "obj_angles": oang[:T].copy(),
+        "obj_trans": otrans[:T].copy(),
+        "poses": poses[:T].copy(),
+        "trans": htrans[:T].copy(),
+        "betas": betas[:T].copy(),
+        "frames": list(fp["frames"])[:T],
+    }
+    os.makedirs(osp.dirname(packed_pkl_out), exist_ok=True)
+    joblib.dump(out, packed_pkl_out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -334,6 +396,8 @@ def main() -> None:
     depth_mp4 = osp.join(exp_dir, "processed", "depth.mp4")
     human_init_npz = osp.join(exp_dir, "human", "human_params_init.npz")
     object_init_npz = osp.join(exp_dir, "object", "object_params_init.npz")
+    human_gt_npz = osp.join(exp_dir, "human", "human_params_gt.npz")
+    object_gt_npz = osp.join(exp_dir, "object", "object_params_gt.npz")
     hy3d_mesh = osp.join(exp_dir, "object", "model.obj")
     video_src = osp.join(exp_dir, "video.mp4")
     tmp_root = osp.join(tempfile.gettempdir(), "cari4d_run_demo", osp.basename(exp_dir))
@@ -341,7 +405,8 @@ def main() -> None:
     masks_dir = osp.join(tmp_root, "masks")
     nlf_dir = osp.join(tmp_root, "nlf-from-human-init")
     fp_dir = osp.join(tmp_root, "fp-from-object-init")
-    packed_root = osp.join(exp_dir, "data", "packed")
+    packed_root = osp.join(tmp_root, "packed-from-gt")
+    packed_gt_pkl = osp.join(packed_root, f"{video_prefix}_GT-packed.pkl")
     video = osp.join(videos_dir, f"{video_prefix}.{cam_id}.color.mp4")
     depth_reg = osp.join(videos_dir, f"{video_prefix}.{cam_id}.depth-reg.mp4")
     color_pkl = osp.join(videos_dir, f"{video_prefix}.{cam_id}.color.pkl")
@@ -349,7 +414,17 @@ def main() -> None:
     nlf_params_pkl = osp.join(nlf_dir, f"{video_prefix}_params.pkl")
     fp_all_pkl = osp.join(fp_dir, f"{video_prefix}_all.pkl")
 
-    required_paths = [hy3d_mesh, human_mask_mp4, object_mask_mp4, depth_mp4, human_init_npz, object_init_npz, video_src]
+    required_paths = [
+        hy3d_mesh,
+        human_mask_mp4,
+        object_mask_mp4,
+        depth_mp4,
+        human_init_npz,
+        object_init_npz,
+        human_gt_npz,
+        object_gt_npz,
+        video_src,
+    ]
     missing = [p for p in required_paths if not osp.exists(p)]
     if missing:
         print("missing required paths:", file=sys.stderr)
@@ -373,6 +448,13 @@ def main() -> None:
         human_init_npz=human_init_npz,
         fp_all_pkl=fp_all_pkl,
         nlf_params_pkl_out=nlf_params_pkl,
+    )
+    build_packed_from_gt_npz(
+        human_gt_npz=human_gt_npz,
+        object_gt_npz=object_gt_npz,
+        nlf_params_pkl=nlf_params_pkl,
+        fp_all_pkl=fp_all_pkl,
+        packed_pkl_out=packed_gt_pkl,
     )
     os.makedirs(videos_dir, exist_ok=True)
     for src, dst in ((video_src, video), (depth_mp4, depth_reg)):

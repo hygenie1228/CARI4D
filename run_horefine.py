@@ -638,16 +638,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
                         y1, y2 = int(h0 * 0.15), int(h0 * 1.0)
                         pr_side = rend_pr_side[j][y1:y2, x1:x2]
                         gt_side = rend_gt_side[j][y1:y2, x1:x2]
-                        # if not iou_debug_saved:
-                        #     imageio.imwrite(osp.join(exp_root, "debug_row2_col3_pred_side.png"), pr_side)
-                        #     imageio.imwrite(osp.join(exp_root, "debug_row2_col4_gt_side.png"), gt_side)
-                        #     iou_debug_saved = True
-                        # pr_mask = pr_side.sum(axis=-1) > 0
-                        # gt_mask = gt_side.sum(axis=-1) > 0
-                        # union = np.logical_or(pr_mask, gt_mask).sum()
-                        # iou = 0.0 if union == 0 else float(np.logical_and(pr_mask, gt_mask).sum() / union)
-                        # assert iou > 0.5, f"GT render alignment check failed: IoU={iou:.4f} at frame {frame_time}"
-                        # assert 0 
+
                     comb = np.concatenate(combs, axis=1)
                     cv2.putText(comb, frame_time+ f' idx {j+start}', (comb.shape[1] // 4, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
                                 (0, 255, 255), 2)

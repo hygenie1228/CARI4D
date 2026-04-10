@@ -67,7 +67,7 @@ def _min_frame_count(
     video_path: str,
     mask_h_path: str,
     mask_o_path: str,
-    cap: int,
+    cap: int | None,
     depth_path: str | None = None,
 ) -> int:
     def _count(path: str) -> int:
@@ -81,7 +81,7 @@ def _min_frame_count(
     counts = [_count(video_path), _count(mask_h_path), _count(mask_o_path)]
     if depth_path is not None and osp.isfile(depth_path):
         counts.append(_count(depth_path))
-    n = min(*counts, cap)
+    n = min(*counts) if cap is None else min(*counts, cap)
     if n <= 0:
         raise RuntimeError("failed to determine positive frame count from input videos")
     return n
@@ -592,7 +592,7 @@ def prepare_data(
     exp_dir: str,
     human_gt_npz: str,
     object_gt_npz: str,
-    max_frames: int,
+    max_frames: int | None,
     input_size: int,
     simple_render: bool,
     force_rebuild: bool = False,
@@ -944,7 +944,7 @@ def main() -> None:
     parser.add_argument("--base_ckpt", type=str, default="data/base_checkpoints/base_coconet.pth")
     parser.add_argument("--human_gt_npz", type=str, default=None)
     parser.add_argument("--object_gt_npz", type=str, default=None)
-    parser.add_argument("--max_frames", type=int, default=96)
+    parser.add_argument("--max_frames", type=int, default=None)
     parser.add_argument("--input_size", type=int, default=224)
     parser.add_argument("--clip_len", type=int, default=32)
     parser.add_argument("--window", type=int, default=16)
