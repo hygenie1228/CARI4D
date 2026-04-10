@@ -634,17 +634,15 @@ def prepare_data(
     # `human_gt_npz` / `object_gt_npz` here are treated as initialization inputs.
     human_init = _load_human_gt(human_gt_npz, n_frames)
     obj_init = _load_object_gt(object_gt_npz, n_frames)
-    # Loss supervision should prefer GT labels if available.
+    # Loss supervision must use GT labels.
     human_sup_npz = osp.join(exp_dir, "human", "human_params_gt.npz")
     object_sup_npz = osp.join(exp_dir, "object", "object_params_gt.npz")
-    if osp.isfile(human_sup_npz) and osp.isfile(object_sup_npz):
-        human_sup = _load_human_gt(human_sup_npz, n_frames)
-        obj_sup = _load_object_gt(object_sup_npz, n_frames)
-        print(f"[prepare] supervision labels: GT ({human_sup_npz}, {object_sup_npz})")
-    else:
-        human_sup = human_init
-        obj_sup = obj_init
-        print("[prepare] warning: GT supervision npz missing; fallback to init labels.")
+    if not osp.isfile(human_sup_npz) or not osp.isfile(object_sup_npz):
+        missing = [p for p in (human_sup_npz, object_sup_npz) if not osp.isfile(p)]
+        raise FileNotFoundError(f"missing required GT supervision npz: {missing}")
+    human_sup = _load_human_gt(human_sup_npz, n_frames)
+    obj_sup = _load_object_gt(object_sup_npz, n_frames)
+    print(f"[prepare] supervision labels: GT ({human_sup_npz}, {object_sup_npz})")
     paths = _write_support_files(exp_dir, seq_name, human_init, obj_init, human_sup, obj_sup, n_frames)
     _write_render_h5(
         exp_dir=exp_dir,
@@ -666,6 +664,7 @@ def run_finetune(
     clip_len: int,
     window: int,
     num_epochs: int,
+    config_pth: str,
 ) -> None:
     def _write_dummy_obj(path: str) -> None:
         os.makedirs(osp.dirname(path), exist_ok=True)
@@ -737,7 +736,7 @@ def run_finetune(
     cmd = [
         sys.executable,
         "learning/training/trainer.py",
-        "config=learning/configs/cari4d-release.yml",
+        f"config={config_pth}",
         f"split_file={paths.split_json}",
         f"render_root={paths.render_root}",
         f"packed_root={paths.packed_root}",
@@ -769,7 +768,9 @@ def run_finetune(
     subprocess.run(cmd, check=True, cwd=ROOT)
 
 
-def export_finetune_visualization(exp_dir: str, paths: PreparedPaths, ckpt_file: str | None = None) -> None:
+def export_finetune_visualization(
+    exp_dir: str, paths: PreparedPaths, ckpt_file: str | None = None, config_pth: str = "learning/configs/coconet-finetuning.yml"
+) -> None:
     seq_name, cam_id = parse_exp_dir(exp_dir)
     default_save_dir = osp.join(exp_dir, "data", "finetune_ckpts")
     default_exp_name = "."
@@ -860,7 +861,7 @@ def export_finetune_visualization(exp_dir: str, paths: PreparedPaths, ckpt_file:
     cmd = [
         sys.executable,
         "run_horefine.py",
-        "config=learning/configs/cari4d-release.yml",
+        f"config={config_pth}",
         f"split_file={paths.split_json}",
         "use_sel_view=True",
         "render_video=True",
@@ -888,6 +889,28 @@ def export_finetune_visualization(exp_dir: str, paths: PreparedPaths, ckpt_file:
     except subprocess.CalledProcessError as e:
         print(f"[viz] warning: visualization export failed: {e}")
         return
+
+    latest_pth = None
+    latest_pth_mtime = -1.0
+    for root, _, files in os.walk(vis_dir):
+        for fname in files:
+            if not fname.endswith(".pth"):
+                continue
+            pth_path = osp.join(root, fname)
+            mtime = osp.getmtime(pth_path)
+            if mtime > latest_pth_mtime:
+                latest_pth_mtime = mtime
+                latest_pth = pth_path
+    if latest_pth is not None:
+        coconet_dir = osp.join(exp_dir, "coconet")
+        os.makedirs(coconet_dir, exist_ok=True)
+        dst_pth = osp.join(coconet_dir, "hoi_output_finetued.pth")
+        if osp.exists(dst_pth):
+            os.remove(dst_pth)
+        os.replace(latest_pth, dst_pth)
+        print(f"[viz] moved hoi output -> {dst_pth}")
+    else:
+        print(f"[viz] warning: no new pth found in {vis_dir}")
 
     copied = 0
     for fname in os.listdir(vis_dir):
@@ -925,6 +948,12 @@ def main() -> None:
     parser.add_argument("--clip_len", type=int, default=32)
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument(
+        "--config_pth",
+        type=str,
+        default="learning/configs/coconet-finetuning.yml",
+        help="Hydra config path used for both trainer and run_horefine.",
+    )
     parser.add_argument("--prepare_only", action="store_true")
     parser.add_argument(
         "--simple_render",
@@ -940,24 +969,25 @@ def main() -> None:
 
     exp_dir = osp.abspath(args.exp_dir)
     base_ckpt = osp.abspath(args.base_ckpt)
+    config_pth = osp.abspath(args.config_pth)
     if args.human_gt_npz:
         human_gt_npz = osp.abspath(args.human_gt_npz)
     else:
-        human_init = osp.join(exp_dir, "human", "human_params_init.npz")
-        human_gt = osp.join(exp_dir, "human", "human_params_gt.npz")
-        human_gt_npz = human_init if osp.isfile(human_init) else human_gt
-        if human_gt_npz == human_gt:
-            print(f"[prepare] warning: init missing, fallback to GT: {human_gt_npz}")
-
+        human_gt_npz = osp.join(exp_dir, "human", "human_params_init.npz")
     if args.object_gt_npz:
         object_gt_npz = osp.abspath(args.object_gt_npz)
     else:
-        object_init = osp.join(exp_dir, "object", "object_params_init.npz")
-        object_gt = osp.join(exp_dir, "object", "object_params_gt.npz")
-        object_gt_npz = object_init if osp.isfile(object_init) else object_gt
-        if object_gt_npz == object_gt:
-            print(f"[prepare] warning: init missing, fallback to GT: {object_gt_npz}")
-    required = [base_ckpt, human_gt_npz, object_gt_npz, osp.join(exp_dir, "video.mp4")]
+        object_gt_npz = osp.join(exp_dir, "object", "object_params_init.npz")
+
+    required = [
+        base_ckpt,
+        config_pth,
+        human_gt_npz,  # required init input
+        object_gt_npz,  # required init input
+        osp.join(exp_dir, "human", "human_params_gt.npz"),  # required GT supervision
+        osp.join(exp_dir, "object", "object_params_gt.npz"),  # required GT supervision
+        osp.join(exp_dir, "video.mp4"),
+    ]
     missing = [p for p in required if not osp.exists(p)]
     if missing:
         print("missing required paths:", file=sys.stderr)
@@ -980,7 +1010,7 @@ def main() -> None:
         return
     if args.num_epochs <= 0:
         print("[train] num_epochs<=0, skipping finetuning and exporting visualization from base checkpoint.")
-        export_finetune_visualization(exp_dir=exp_dir, paths=paths, ckpt_file=base_ckpt)
+        export_finetune_visualization(exp_dir=exp_dir, paths=paths, ckpt_file=base_ckpt, config_pth=config_pth)
         return
     run_finetune(
         exp_dir=exp_dir,
@@ -989,8 +1019,9 @@ def main() -> None:
         clip_len=args.clip_len,
         window=args.window,
         num_epochs=args.num_epochs,
+        config_pth=config_pth,
     )
-    export_finetune_visualization(exp_dir=exp_dir, paths=paths)
+    export_finetune_visualization(exp_dir=exp_dir, paths=paths, config_pth=config_pth)
 
 
 if __name__ == "__main__":

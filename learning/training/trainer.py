@@ -174,6 +174,17 @@ class Trainer(object):
             wandb.log(log_dict, step=step)
         if not (self.accelerator.is_main_process and self.tb_writer is not None):
             return
+        legacy_tb_map = {
+            "loss_train": "train/loss",
+            "loss_train_r": "train/loss_r",
+            "loss_train_t": "train/loss_t",
+            "loss_train_acc": "train/loss_acc",
+            "lr": "train/lr",
+            "loss_val": "val/loss",
+            "loss_val_r": "val/loss_r",
+            "loss_val_t": "val/loss_t",
+            "loss_val_acc": "val/loss_acc",
+        }
         for key, value in log_dict.items():
             scalar = None
             if torch.is_tensor(value):
@@ -182,7 +193,9 @@ class Trainer(object):
             elif isinstance(value, (float, int, np.floating, np.integer)):
                 scalar = float(value)
             if scalar is not None:
-                self.tb_writer.add_scalar(str(key), scalar, step)
+                tb_key = legacy_tb_map.get(str(key), str(key))
+                if tb_key.startswith("train/") or tb_key.startswith("val/"):
+                    self.tb_writer.add_scalar(tb_key, scalar, step)
 
 
     def train(self):
@@ -693,6 +706,29 @@ class Trainer(object):
         rot_delta_mat_gt = batch['delta_rot']
         rot_delta_gt = so3_log_map(rot_delta_mat_gt.reshape(B * T, 3, 3).permute(0, 2, 1))  # permute: pyt3d so3 uses col order
         rot_delta_gt = rot_delta_gt / cfg['rot_normalizer']  # random noise sample range.
+
+        # from scipy.spatial.transform import Rotation as R
+        # import numpy as np
+        # gt = batch['smpl_poses_gt'][0].detach().cpu().numpy()  # (T, 156)
+        # gt_aa72 = gt[:, :72]
+        # inp_rm = batch['nlf_rotmat'].detach().cpu().numpy()
+        # # nlf_rotmat can be either (B, T, J, 3, 3) or (BT, J, 3, 3).
+        # if inp_rm.ndim == 5:
+        #     inp_rm_t = inp_rm[0]  # (T, J, 3, 3)
+        # elif inp_rm.ndim == 4:
+        #     inp_rm_t = inp_rm  # (BT, J, 3, 3)
+        # else:
+        #     raise RuntimeError(f"unexpected nlf_rotmat shape: {inp_rm.shape}")
+        # t_cmp = min(gt_aa72.shape[0], inp_rm_t.shape[0])
+        # j_cmp = min(24, inp_rm_t.shape[1])
+        # inp_aa = R.from_matrix(inp_rm_t[:t_cmp, :j_cmp].reshape(-1, 3, 3)).as_rotvec().reshape(t_cmp, j_cmp, 3)
+        # inp_aa72 = inp_aa.reshape(t_cmp, j_cmp * 3)
+        # gt_cmp = gt_aa72[:t_cmp, : j_cmp * 3]
+        # pose_mae = float(np.mean(np.abs(gt_cmp - inp_aa72)))
+        # pose_max = float(np.max(np.abs(gt_cmp - inp_aa72)))
+        # print(f"[debug] gt-vs-input pose mae={pose_mae:.6f}, max={pose_max:.6f}, T={t_cmp}, J={j_cmp}")
+        # import pdb; pdb.set_trace()
+        
         trans = output['trans'].float()  # (BT,3)
         rot = output['rot'].float()  # BT, 3
         trans_delta_pred = trans
