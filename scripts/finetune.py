@@ -589,11 +589,32 @@ def prepare_data(
     input_size: int,
     simple_render: bool,
 ) -> PreparedPaths:
+    seq_name, _ = parse_exp_dir(exp_dir)
+    data_root = osp.join(exp_dir, "data")
+    existing_paths = PreparedPaths(
+        seq_name=seq_name,
+        split_json=osp.join(data_root, "splits", "finetune_split.json"),
+        render_root=osp.join(data_root, "render"),
+        packed_root=osp.join(data_root, "packed"),
+        nlf_root=osp.join(data_root, "nlf"),
+        fp_root=osp.join(data_root, "fp"),
+    )
+    required_prepared = [
+        existing_paths.split_json,
+        osp.join(existing_paths.render_root, f"{seq_name}_render.h5"),
+        osp.join(existing_paths.packed_root, f"{seq_name}_GT-packed.pkl"),
+        osp.join(existing_paths.nlf_root, f"{seq_name}_params.pkl"),
+        osp.join(existing_paths.fp_root, f"{seq_name}_all.pkl"),
+    ]
+    if osp.isdir(data_root) and all(osp.isfile(p) for p in required_prepared):
+        print(f"[prepare] existing data found at {data_root}; skip rebuild.")
+        print(f"[prepare] render={osp.join(existing_paths.render_root, f'{seq_name}_render.h5')}")
+        return existing_paths
+
     video_path = osp.join(exp_dir, "video.mp4")
     human_mask_path = osp.join(exp_dir, "processed", "human_mask.mp4")
     object_mask_path = osp.join(exp_dir, "processed", "object_mask.mp4")
     depth_path = osp.join(exp_dir, "processed", "depth.mp4")
-    seq_name, _ = parse_exp_dir(exp_dir)
     depth_for_count = None if simple_render else depth_path
     n_frames = _min_frame_count(
         video_path, human_mask_path, object_mask_path, max_frames, depth_for_count
@@ -673,6 +694,22 @@ def run_finetune(
     save_dir = osp.join(exp_dir, "data", "finetune_ckpts")
     os.makedirs(save_dir, exist_ok=True)
     exp_name = f"{paths.seq_name}-finetune"
+    train_exp_dir = osp.join(save_dir, exp_name)
+    os.makedirs(train_exp_dir, exist_ok=True)
+
+    # Default behavior: resume from the latest step checkpoint if it exists.
+    step_ckpts = sorted(
+        [
+            osp.join(train_exp_dir, name)
+            for name in os.listdir(train_exp_dir)
+            if re.match(r"^step\d+\.pth$", name)
+        ]
+    )
+    ckpt_for_train = step_ckpts[-1] if step_ckpts else base_ckpt
+    if step_ckpts:
+        print(f"[train] resume from latest checkpoint: {ckpt_for_train}")
+    else:
+        print(f"[train] no prior step checkpoint found; start from base checkpoint: {ckpt_for_train}")
 
     cmd = [
         sys.executable,
@@ -686,7 +723,7 @@ def run_finetune(
         "rgb_root=unused",
         f"save_dir={save_dir}",
         f"exp_name={exp_name}",
-        f"ckpt_file={base_ckpt}",
+        f"ckpt_file={ckpt_for_train}",
         "no_wandb=True",
         "job=test",
         "cam_id=0",

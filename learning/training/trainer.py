@@ -38,6 +38,7 @@ import torch.nn.functional as F
 from accelerate import DistributedDataParallelKwargs
 from learning.models import get_model
 import tools.geometry_utils as geom_utils
+from torch.utils.tensorboard import SummaryWriter
 
 
 class Trainer(object):
@@ -138,6 +139,13 @@ class Trainer(object):
         self.dataset_test = dataset_test
 
         # init logging
+        self.tb_writer = None
+        if accelerator.is_main_process:
+            tb_dir = osp.join(self.exp_dir, "tensorboard")
+            os.makedirs(tb_dir, exist_ok=True)
+            self.tb_writer = SummaryWriter(log_dir=tb_dir)
+            print(f"TensorBoard logging enabled: {tb_dir}")
+
         if not cfg.no_wandb and accelerator.is_main_process:
             # find out the previous wandb run
             run_folders = sorted(glob(osp.join(self.exp_dir, 'wandb/run-*')))
@@ -185,6 +193,12 @@ class Trainer(object):
                                 'loss_train_t': loss_t.item(), 'loss_train_acc': loss_acc.item(),
                                 'lr': optimizer.param_groups[0]['lr']}
                     wandb.log(log_dict, step=train_state.step)
+                if accelerator.is_main_process and self.tb_writer is not None:
+                    self.tb_writer.add_scalar("train/loss", loss.item(), train_state.step)
+                    self.tb_writer.add_scalar("train/loss_r", loss_r.item(), train_state.step)
+                    self.tb_writer.add_scalar("train/loss_t", loss_t.item(), train_state.step)
+                    self.tb_writer.add_scalar("train/loss_acc", loss_acc.item(), train_state.step)
+                    self.tb_writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], train_state.step)
 
                 # Backward pass - accelerator handles the backward pass
                 accelerator.backward(loss)
@@ -219,6 +233,9 @@ class Trainer(object):
             train_state.epoch += 1
         if accelerator.is_main_process:
             self.save_checkpoint(accelerator, cfg, model, optimizer, scheduler, train_state)
+            if self.tb_writer is not None:
+                self.tb_writer.flush()
+                self.tb_writer.close()
         accelerator.print("Training complete!")
 
     def save_checkpoint(self, accelerator, cfg, model, optimizer, scheduler, train_state):
@@ -235,6 +252,15 @@ class Trainer(object):
         }
         accelerator.save(checkpoint_dict, ckpt_file)
         print(f"ckpt saved to {ckpt_file}")
+        # Keep only the latest step checkpoint to save disk space.
+        ckpt_files = sorted(glob(osp.join(self.exp_dir, "step*.pth")))
+        for old_ckpt in ckpt_files[:-1]:
+            if osp.basename(old_ckpt) != osp.basename(ckpt_file):
+                try:
+                    os.remove(old_ckpt)
+                    print(f"removed old ckpt: {old_ckpt}")
+                except OSError as e:
+                    print(f"warning: failed to remove old ckpt {old_ckpt}: {e}")
 
     def eval_model(self, cfg, model, train_state, val_dataloader):
         model.eval()
@@ -258,6 +284,11 @@ class Trainer(object):
             wandb.log({'loss_val': loss_val, 'loss_val_r': np.mean(loss_val_r),
                        'loss_val_t': np.mean(loss_val_t), 'loss_val_acc': np.mean(loss_val_acc)},
                       step=train_state.step)
+        if self.accelerator.is_main_process and self.tb_writer is not None:
+            self.tb_writer.add_scalar("val/loss", loss_val, train_state.step)
+            self.tb_writer.add_scalar("val/loss_r", np.mean(loss_val_r), train_state.step)
+            self.tb_writer.add_scalar("val/loss_t", np.mean(loss_val_t), train_state.step)
+            self.tb_writer.add_scalar("val/loss_acc", np.mean(loss_val_acc), train_state.step)
         print(f'--- Eval at step {train_state.step}, loss: {loss_val:.4f} lr: {self.optimizer.param_groups[0]["lr"]:.5f} ---')
         model.train()
 
