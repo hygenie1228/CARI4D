@@ -1,2 +1,3 @@
-python scripts/finetune.py --exp_dir experiments/debug/Date03_Sub03_backpack_back_0 --num_epochs 20
-[prepare] sequence=Date03_Sub03_backpack_back, frames=96
+python scripts/finetune.py --exp_dir experiments/debug/Date03_Sub03_backpack_back_0 --num_epochs 1
+
+python scripts/run_demo.py --exp_dir experiments/debug/Date03_Sub03_backpack_back_0 

@@ -168,6 +168,22 @@ class Trainer(object):
             self.smpl_male = get_smpl('male', True).cuda()
             self.smpl_female = get_smpl('female', True).cuda()
 
+    def _log_metrics(self, log_dict: dict, step: int) -> None:
+        """Log to wandb (if enabled) and TensorBoard (scalars only)."""
+        if self.accelerator.is_main_process and (not self.cfg.no_wandb):
+            wandb.log(log_dict, step=step)
+        if not (self.accelerator.is_main_process and self.tb_writer is not None):
+            return
+        for key, value in log_dict.items():
+            scalar = None
+            if torch.is_tensor(value):
+                if value.numel() == 1:
+                    scalar = float(value.detach().cpu().item())
+            elif isinstance(value, (float, int, np.floating, np.integer)):
+                scalar = float(value)
+            if scalar is not None:
+                self.tb_writer.add_scalar(str(key), scalar, step)
+
 
     def train(self):
         cfg = self.cfg
@@ -192,7 +208,19 @@ class Trainer(object):
                     log_dict = {"loss_train": loss.item(), 'loss_train_r': loss_r.item(),
                                 'loss_train_t': loss_t.item(), 'loss_train_acc': loss_acc.item(),
                                 'lr': optimizer.param_groups[0]['lr']}
-                    wandb.log(log_dict, step=train_state.step)
+                    self._log_metrics(log_dict, train_state.step)
+                elif accelerator.is_main_process:
+                    # Keep the same core train loss keys in TensorBoard even when wandb is disabled.
+                    self._log_metrics(
+                        {
+                            "loss_train": loss.item(),
+                            "loss_train_r": loss_r.item(),
+                            "loss_train_t": loss_t.item(),
+                            "loss_train_acc": loss_acc.item(),
+                            "lr": optimizer.param_groups[0]['lr'],
+                        },
+                        train_state.step,
+                    )
                 if accelerator.is_main_process and self.tb_writer is not None:
                     self.tb_writer.add_scalar("train/loss", loss.item(), train_state.step)
                     self.tb_writer.add_scalar("train/loss_r", loss_r.item(), train_state.step)
@@ -281,9 +309,25 @@ class Trainer(object):
             train_state.best_val = loss_val
         if not cfg.no_wandb and self.accelerator.is_main_process:
             # logging only using the main process
-            wandb.log({'loss_val': loss_val, 'loss_val_r': np.mean(loss_val_r),
-                       'loss_val_t': np.mean(loss_val_t), 'loss_val_acc': np.mean(loss_val_acc)},
-                      step=train_state.step)
+            self._log_metrics(
+                {
+                    'loss_val': loss_val,
+                    'loss_val_r': np.mean(loss_val_r),
+                    'loss_val_t': np.mean(loss_val_t),
+                    'loss_val_acc': np.mean(loss_val_acc),
+                },
+                train_state.step,
+            )
+        elif self.accelerator.is_main_process:
+            self._log_metrics(
+                {
+                    'loss_val': loss_val,
+                    'loss_val_r': np.mean(loss_val_r),
+                    'loss_val_t': np.mean(loss_val_t),
+                    'loss_val_acc': np.mean(loss_val_acc),
+                },
+                train_state.step,
+            )
         if self.accelerator.is_main_process and self.tb_writer is not None:
             self.tb_writer.add_scalar("val/loss", loss_val, train_state.step)
             self.tb_writer.add_scalar("val/loss_r", np.mean(loss_val_r), train_state.step)
@@ -348,9 +392,12 @@ class Trainer(object):
                 loss_t_abs = torch.abs(out_dict['trans_abs'] - trans_gt).mean() * cfg.w_abs_trans
             loss = loss_r + loss_t + loss_r_abs + loss_t_abs
 
-            if not self.cfg.no_wandb and self.accelerator.is_main_process:
+            if self.accelerator.is_main_process:
                 key = 'train' if self.model.training else 'val'
-                wandb.log({f'loss_t_abs_{key}': loss_t_abs, f'loss_r_abs_{key}': loss_r_abs,}, step=self.train_state.step)
+                self._log_metrics(
+                    {f'loss_t_abs_{key}': loss_t_abs, f'loss_r_abs_{key}': loss_r_abs},
+                    self.train_state.step,
+                )
         elif cfg['loss_type'] == 'l2-abs-delta':
             # model predicts both delta and abs pose
             loss_t = ((trans_delta_pred - trans_delta_gt)**2).mean()
@@ -368,9 +415,12 @@ class Trainer(object):
                 loss_t_abs = ((out_dict['trans_abs'] - trans_gt)**2).mean() * cfg.w_abs_trans
             loss = loss_r + loss_t + loss_r_abs + loss_t_abs
 
-            if not self.cfg.no_wandb and self.accelerator.is_main_process:
+            if self.accelerator.is_main_process:
                 key = 'train' if self.model.training else 'val'
-                wandb.log({f'loss_t_abs_{key}': loss_t_abs, f'loss_r_abs_{key}': loss_r_abs,}, step=self.train_state.step)
+                self._log_metrics(
+                    {f'loss_t_abs_{key}': loss_t_abs, f'loss_r_abs_{key}': loss_r_abs},
+                    self.train_state.step,
+                )
         elif cfg['loss_type'] in ['l1-absrot-delta', 'l1-absrot-delta-hum', 'l2-absrot-delta-humabs', 'l1-absrot-delta-humabs', 'l2-absrot-delta-hum']:
             assert cfg.obj_pose_dim_input in [3, 6], 'must encode object rotation only!'
             loss_func = F.l1_loss if 'l1' in cfg['loss_type'] else F.mse_loss
@@ -528,7 +578,7 @@ class Trainer(object):
                             loss_dict[f'{key}/loss_velo'] = loss_velo
                         # contact prediction
                         loss_contact = 0.
-                        if self.cfg.cont_out_dim > 0:
+                        if self.cfg.cont_out_dim > 0 and ('contact_dist_gt' in batch) and ('contact' in out_dict):
                             cont_gt = batch['contact_dist_gt'] # (B, T, 52)
                             cont_gt_hands = cont_gt[:, :, [22, 23+15]]
                             cont_pred = out_dict['contact'].reshape(bs, t, -1)
@@ -569,8 +619,8 @@ class Trainer(object):
                     loss_dict[f'loss_hum_j_{key}'] = loss_hum_j
 
 
-            if not self.cfg.no_wandb and self.accelerator.is_main_process:
-                wandb.log(loss_dict, step=self.train_state.step)
+            if self.accelerator.is_main_process:
+                self._log_metrics(loss_dict, self.train_state.step)
 
         elif cfg['loss_type'] == 'l1+geo-acc':
             loss_t = torch.abs(trans_delta_pred - trans_delta_gt).mean()
@@ -649,7 +699,7 @@ class Trainer(object):
         trans_delta_gt = trans_delta_gt.reshape(B * T, 3)  # FP was trained to predict
 
         # log error
-        if self.accelerator.is_main_process and not cfg.no_wandb:
+        if self.accelerator.is_main_process:
             with torch.no_grad():
                 log_dict = {}
                 poseA = batch['pose_perturbed']
@@ -664,7 +714,7 @@ class Trainer(object):
                 log_dict[f'{key}/err_r_deg'] = err_r * 180/torch.pi
 
                 # log contact accuracy 
-                if self.cfg.cont_out_dim > 0:
+                if self.cfg.cont_out_dim > 0 and ('contact_dist_gt' in batch) and ('contact' in output):
                     cont_gt = batch['contact_dist_gt'] # (B, T, 52)
                     cont_gt_hands = cont_gt[:, :, [22, 23+15]]
                     cont_pred = output['contact'].reshape(B, T, -1)
@@ -677,7 +727,7 @@ class Trainer(object):
                 if self.cfg['loss_type'] in ['l1-abs-delta', 'l1-absrot-delta', 'l1-absrot-delta-hum', 'l1-absrot-delta-humabs', 'l2-absrot-delta-humabs']:
                     B_in_cams_interm = self.abspose_from_relative(batch, cfg, poseA, output['rot'], output['trans'])
                     # also compute symmetries 
-                    if self.cfg.symm_loss:
+                    if self.cfg.symm_loss and ('pose_gt_symm' in batch):
                         B_in_cams_gt_symm = batch['pose_gt_symm'] # (B, T, N, 4, 4)
                         err_r = geodesic_distance(B_in_cams_gt_symm[:, :, :, :3, :3].reshape(-1, 3, 3),
                                               B_in_cams_interm[:, :, None, :3, :3].repeat(1, 1, B_in_cams_gt_symm.shape[2], 1, 1).reshape(-1, 3, 3)).reshape(-1, B_in_cams_gt_symm.shape[2]).min(-1)[0]
@@ -693,7 +743,7 @@ class Trainer(object):
                     key = 'train' if model.training else 'val'
                     log_dict[f'{key}/err_interm_t'] = err_t
                     log_dict[f'{key}/err_interm_r'] = err_r
-                wandb.log(log_dict, step=self.train_state.step)
+                self._log_metrics(log_dict, self.train_state.step)
 
         # visualize input and output predictions
         if vis and self.accelerator.is_main_process:
@@ -768,7 +818,7 @@ class Trainer(object):
                                                transparency=0, is_input_rgb=True)
 
                 # add contact text 
-                if self.cfg.cont_out_dim > 0:
+                if self.cfg.cont_out_dim > 0 and ('contact_dist_gt' in batch) and ('contact' in output):
                     cont_gt = batch['contact_dist_gt'][bid, i, [22, 23+15]]
                     cont_text = f'lh: {cont_gt[0]:.3f}, rh: {cont_gt[1]:.3f}'
                     cv2.putText(vis_gt, cont_text, (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1)
@@ -792,8 +842,8 @@ class Trainer(object):
                 outfile = osp.join(self.exp_dir, f'vis/{key}_all_{i}.png')
                 Image.fromarray(comb).save(outfile)
 
-            if not self.cfg.no_wandb:
-                wandb.log(log_dict, step=self.train_state.step)
+            if self.accelerator.is_main_process:
+                self._log_metrics(log_dict, self.train_state.step)
             end = time.time()
             print(f'Step {self.train_state.step} {key} vis uploading finished after {end - start} seconds')
 

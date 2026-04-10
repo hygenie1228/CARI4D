@@ -20,6 +20,8 @@ import pickle
 import re
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 
 import cv2
@@ -746,6 +748,98 @@ def run_finetune(
     subprocess.run(cmd, check=True, cwd=ROOT)
 
 
+def export_finetune_visualization(exp_dir: str, paths: PreparedPaths) -> None:
+    seq_name, cam_id = parse_exp_dir(exp_dir)
+    train_exp_dir = osp.join(exp_dir, "coconet", f"{seq_name}-finetune")
+    step_ckpts = sorted(
+        [
+            osp.join(train_exp_dir, name)
+            for name in os.listdir(train_exp_dir)
+            if re.match(r"^step\d+\.pth$", name)
+        ]
+    ) if osp.isdir(train_exp_dir) else []
+    if not step_ckpts:
+        print(f"[viz] skip: no step checkpoint found in {train_exp_dir}")
+        return
+    ckpt_file = step_ckpts[-1]
+
+    cari4d = osp.join(exp_dir, "cari4d")
+    os.makedirs(cari4d, exist_ok=True)
+    human_mask_mp4 = osp.join(exp_dir, "processed", "human_mask.mp4")
+    object_mask_mp4 = osp.join(exp_dir, "processed", "object_mask.mp4")
+    depth_mp4 = osp.join(exp_dir, "processed", "depth.mp4")
+    video_mp4 = osp.join(exp_dir, "video.mp4")
+    hy3d_mesh = osp.join(exp_dir, "object", "model.obj")
+    required = [human_mask_mp4, object_mask_mp4, video_mp4, depth_mp4, hy3d_mesh, ckpt_file]
+    missing = [p for p in required if not osp.exists(p)]
+    if missing:
+        print("[viz] skip: missing required paths for visualization:")
+        for p in missing:
+            print(f" - {p}")
+        return
+
+    before_ts = time.time()
+    tmp_root = osp.join(tempfile.gettempdir(), "cari4d_finetune_viz", osp.basename(exp_dir))
+    videos_dir = osp.join(tmp_root, "videos")
+    os.makedirs(videos_dir, exist_ok=True)
+    video_prefix = seq_name
+    color_mp4 = osp.join(videos_dir, f"{video_prefix}.{cam_id}.color.mp4")
+    depth_reg = osp.join(videos_dir, f"{video_prefix}.{cam_id}.depth-reg.mp4")
+    for src, dst in ((video_mp4, color_mp4), (depth_mp4, depth_reg)):
+        if osp.lexists(dst):
+            os.remove(dst)
+        os.symlink(osp.abspath(src), dst)
+
+    cmd = [
+        sys.executable,
+        "run_horefine.py",
+        "config=learning/configs/cari4d-release.yml",
+        f"split_file={paths.split_json}",
+        "use_sel_view=True",
+        "render_video=True",
+        "use_intermediate=True",
+        "data_name=test-only",
+        f"hy3d_meshes_root={hy3d_mesh}",
+        f"masks_root={human_mask_mp4},{object_mask_mp4}",
+        f"fp_root={paths.fp_root}",
+        f"nlf_root={paths.nlf_root}",
+        f"video={color_mp4}",
+        f"cam_id={cam_id}",
+        f"outpath={cari4d}",
+        f"video_out={cari4d}",
+        f"ckpt_file={ckpt_file}",
+        "no_wandb=True",
+        "job=test-only",
+        "identifier=_finetune",
+    ]
+    print("[viz] running command:")
+    print(" ".join(cmd))
+    try:
+        subprocess.run(cmd, check=True, cwd=ROOT)
+    except subprocess.CalledProcessError as e:
+        print(f"[viz] warning: visualization export failed: {e}")
+        return
+
+    copied = 0
+    for fname in os.listdir(cari4d):
+        if not fname.endswith(".mp4"):
+            continue
+        src_mp4 = osp.join(cari4d, fname)
+        if osp.getmtime(src_mp4) < before_ts:
+            continue
+        if "_input.mp4" in fname:
+            dst_mp4 = osp.join(exp_dir, "after_finetuning_input.mp4")
+        else:
+            dst_mp4 = osp.join(exp_dir, "after_finetuning.mp4")
+        if osp.exists(dst_mp4):
+            os.remove(dst_mp4)
+        os.replace(src_mp4, dst_mp4)
+        copied += 1
+        print(f"[viz] renamed video -> {dst_mp4}")
+    if copied == 0:
+        print(f"[viz] warning: no new mp4 found in {cari4d}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare and launch CARI4D finetuning from base checkpoint.")
     parser.add_argument("--exp_dir", type=str, required=True)
@@ -804,6 +898,7 @@ def main() -> None:
         window=args.window,
         num_epochs=args.num_epochs,
     )
+    export_finetune_visualization(exp_dir=exp_dir, paths=paths)
 
 
 if __name__ == "__main__":

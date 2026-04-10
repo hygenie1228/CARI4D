@@ -328,7 +328,7 @@ def main() -> None:
     exp_dir = osp.abspath(args.exp_dir)
     video_prefix, cam_id = parse_exp_dir(exp_dir)
 
-    cari4d = osp.join(exp_dir, "cari4d")
+    coconet_dir = osp.join(exp_dir, "coconet")
     human_mask_mp4 = osp.join(exp_dir, "processed", "human_mask.mp4")
     object_mask_mp4 = osp.join(exp_dir, "processed", "object_mask.mp4")
     depth_mp4 = osp.join(exp_dir, "processed", "depth.mp4")
@@ -380,7 +380,7 @@ def main() -> None:
         os.symlink(src, dst)
     joblib.dump(intr, color_pkl)
 
-    os.makedirs(cari4d, exist_ok=True)
+    os.makedirs(coconet_dir, exist_ok=True)
 
     cmd = [
         sys.executable,
@@ -398,17 +398,17 @@ def main() -> None:
         f"nlf_root={nlf_dir}",
         f"video={video}",
         f"cam_id={cam_id}",
-        f"outpath={cari4d}",
-        f"video_out={cari4d}",
+        f"outpath={coconet_dir}",
+        f"video_out={coconet_dir}",
     ]
 
     print("running:")
     print(" ".join(cmd))
     subprocess.run(cmd, check=True, cwd=osp.dirname(osp.dirname(__file__)))
     save_name = "cari4d-release+step031397_demo"
-    save_dir = osp.join(cari4d, save_name)
-    src_out = osp.join(cari4d, save_name, f"{video_prefix}.pth")
-    dst_out = osp.join(cari4d, "coconet_output.pth")
+    save_dir = osp.join(coconet_dir, save_name)
+    src_out = osp.join(coconet_dir, save_name, f"{video_prefix}.pth")
+    dst_out = osp.join(coconet_dir, "hoi_output.pth")
     if not osp.isfile(src_out):
         raise FileNotFoundError(f"expected output missing: {src_out}")
     if osp.exists(dst_out):
@@ -419,23 +419,23 @@ def main() -> None:
     print(f"moved output -> {dst_out} (removed {save_dir})")
     mp4_prefix = f"{save_name}+{video_prefix}_it"
     copied = 0
-    for fname in os.listdir(cari4d):
+    for fname in os.listdir(coconet_dir):
         if not fname.endswith(".mp4"):
             continue
         if not fname.startswith(mp4_prefix):
             continue
-        src_mp4 = osp.join(cari4d, fname)
+        src_mp4 = osp.join(coconet_dir, fname)
         if "_input.mp4" in fname:
-            dst_mp4 = osp.join(cari4d, "coconet_output_input.mp4")
+            dst_mp4 = osp.join(coconet_dir, "coconet_output_input.mp4")
         else:
-            dst_mp4 = osp.join(cari4d, "coconet_output.mp4")
+            dst_mp4 = osp.join(coconet_dir, "coconet_output.mp4")
         if osp.exists(dst_mp4):
             os.remove(dst_mp4)
         os.replace(src_mp4, dst_mp4)
         copied += 1
         print(f"renamed video -> {dst_mp4}")
     if copied == 0:
-        print(f"warning: no mp4 found in {cari4d} with prefix {mp4_prefix}")
+        print(f"warning: no mp4 found in {coconet_dir} with prefix {mp4_prefix}")
 
 
 if __name__ == "__main__":
