@@ -1,10 +1,35 @@
-lr: 0.0001 #0.0001
+lr: 0.001 #0.0001
 c_in: 6 # xyz + mask (3 channel, with full obj mask included)
 zfar: 'Infinity'
 debug: 2
-w_rot: 0.8
-w_abs_rot: 0.25
-w_abs_trans: 1
+
+symm_loss: false
+
+# loss weights for finetuning
+w_rot: 1.0       # Object delta rotation loss weight (rot vs delta-rot GT)
+w_transl: 1.0    # Object delta translation loss weight (trans vs delta-trans GT)
+w_abs_rot: 1.0   # Object absolute rotation loss weight (rot_abs vs abs-rot GT)
+w_hum_rot: 1.0   # Human pose rotation loss weight
+w_hum_t: 1.0     # Human translation loss weight
+w_hum_j: 2.0     # Human joint position loss weight
+w_hum_b: 0.1     # Human shape (betas) loss weight
+w_velo: 0.0      # Human/object temporal velocity regularization weight
+w_contact: 0.1   # Contact prediction loss weight
+
+# w_rot: 0.1       # Object delta rotation loss weight (rot vs delta-rot GT)
+# w_transl: 1.0    # Object delta translation loss weight (trans vs delta-trans GT)
+# w_abs_rot: 0.1   # Object absolute rotation loss weight (rot_abs vs abs-rot GT)
+# w_abs_trans: 0.1 # Object absolute translation loss weight (used by abs-trans loss types)
+# lw_acc: 0.0      # Temporal acceleration consistency loss weight
+# w_hum_rot: 0.1   # Human pose rotation loss weight
+# w_hum_t: 0.1     # Human translation loss weight
+# w_hum_j: 0.0     # Human joint position loss weight
+# w_hum_b: 0.0     # Human shape (betas) loss weight
+# w_velo: 0.0      # Human/object temporal velocity regularization weight
+# w_contact: 0.0   # Contact prediction loss weight
+# w_velo_obj: 0.0  # Object-only velocity loss weight (for other training modes)
+# w_diff_l2: 10.0  # Diffusion branch L2 loss weight (for diffusion training modes)
+# w_heatmap: 0.0   # Contact heatmap loss weight (if heatmap supervision is enabled)
 
 n_view: 1
 run_id: null
@@ -25,7 +50,6 @@ abspose_posi_encode: true
 bnorm_mask: true
 dropout: 0.05
 dropout_1st: 0 
-symm_loss: true
 pred_head_attn: false 
 mixed_spatial_temporal: true
 num_attn_layers: 2 
@@ -35,11 +59,6 @@ merge_strategy: learned
 merge_factor: 0.0 
 window: 6
 train_smpl_only: false
-w_hum_j: 2.0
-w_hum_t: 1
-w_hum_rot: 1
-w_hum_b: 0.1
-w_contact: 0.1
 fp_err_dim: -1
 input_fp_2nd: false
 input_gtpose_2nd: false

@@ -13,6 +13,7 @@ with minimal custom glue code:
 from __future__ import annotations
 
 import argparse
+import shutil
 import json
 import os
 import os.path as osp
@@ -57,6 +58,21 @@ def parse_exp_dir(exp_dir: str) -> tuple[str, int]:
     if m:
         return m.group(1), int(m.group(2))
     return base, 0
+
+
+def _parse_epoch_list(spec: str) -> list[int]:
+    if not spec.strip():
+        return []
+    out: list[int] = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        val = int(tok)
+        if val <= 0:
+            raise ValueError(f"epoch values must be positive, got {val}")
+        out.append(val)
+    return sorted(set(out))
 
 
 def _rotvec_to_matrix(rotvec: np.ndarray) -> np.ndarray:
@@ -665,6 +681,7 @@ def run_finetune(
     window: int,
     num_epochs: int,
     config_pth: str,
+    viz_epochs: list[int],
 ) -> None:
     def _write_dummy_obj(path: str) -> None:
         os.makedirs(osp.dirname(path), exist_ok=True)
@@ -733,7 +750,7 @@ def run_finetune(
     else:
         print(f"[train] no prior step checkpoint found; start from base checkpoint: {ckpt_for_train}")
 
-    cmd = [
+    common_cmd = [
         sys.executable,
         "learning/training/trainer.py",
         f"config={config_pth}",
@@ -745,7 +762,6 @@ def run_finetune(
         "rgb_root=unused",
         f"save_dir={save_dir}",
         f"exp_name={exp_name}",
-        f"ckpt_file={ckpt_for_train}",
         "no_wandb=True",
         "job=test",
         "cam_id=0",
@@ -756,20 +772,66 @@ def run_finetune(
         f"window={window}",
         "batch_size=1",
         "num_workers=0",
-        f"num_epochs={num_epochs}",
         "val_at_start=False",
         "val_step_interval=1000000",
         "ckpt_interval=1000000",
         "max_step_val=1",
         "debug=0",
     ]
-    print("[train] running command:")
-    print(" ".join(cmd))
-    subprocess.run(cmd, check=True, cwd=ROOT)
+
+    def _run_train_chunk(chunk_epochs: int, ckpt_file: str) -> None:
+        cmd = common_cmd + [f"ckpt_file={ckpt_file}", f"num_epochs={chunk_epochs}"]
+        print("[train] running command:")
+        print(" ".join(cmd))
+        subprocess.run(cmd, check=True, cwd=ROOT)
+
+    viz_targets = sorted({ep for ep in viz_epochs if 1 <= ep <= num_epochs})
+    trained_epochs = 0
+    current_ckpt = ckpt_for_train
+
+    if not viz_targets:
+        _run_train_chunk(num_epochs, current_ckpt)
+        return
+
+    for target_epoch in viz_targets:
+        chunk_epochs = target_epoch - trained_epochs
+        if chunk_epochs <= 0:
+            continue
+        _run_train_chunk(chunk_epochs, current_ckpt)
+        trained_epochs = target_epoch
+        # trainer keeps only the latest step*.pth in train_exp_dir.
+        step_ckpts = sorted(
+            [
+                osp.join(train_exp_dir, name)
+                for name in os.listdir(train_exp_dir)
+                if re.match(r"^step\d+\.pth$", name)
+            ]
+        )
+        if step_ckpts:
+            current_ckpt = step_ckpts[-1]
+        epoch_ckpt = osp.join(train_exp_dir, f"epoch{target_epoch:03d}.pth")
+        shutil.copy2(current_ckpt, epoch_ckpt)
+        print(f"[train] saved epoch checkpoint: {epoch_ckpt}")
+        print(f"[train] export visualization at epoch {target_epoch}")
+        export_finetune_visualization(
+            exp_dir=exp_dir,
+            paths=paths,
+            ckpt_file=current_ckpt,
+            config_pth=config_pth,
+            output_suffix=f"epoch{target_epoch:03d}",
+        )
+
+    remaining_epochs = num_epochs - trained_epochs
+    if remaining_epochs > 0:
+        _run_train_chunk(remaining_epochs, current_ckpt)
 
 
 def export_finetune_visualization(
-    exp_dir: str, paths: PreparedPaths, ckpt_file: str | None = None, config_pth: str = "learning/configs/coconet-finetuning.yml"
+    exp_dir: str,
+    paths: PreparedPaths,
+    ckpt_file: str | None = None,
+    config_pth: str = "learning/configs/coconet-finetuning.yml",
+    output_suffix: str | None = None,
 ) -> None:
     seq_name, cam_id = parse_exp_dir(exp_dir)
     default_save_dir = osp.join(exp_dir, "data", "finetune_ckpts")
@@ -905,7 +967,8 @@ def export_finetune_visualization(
     if latest_pth is not None:
         coconet_dir = osp.join(exp_dir, "coconet")
         os.makedirs(coconet_dir, exist_ok=True)
-        dst_pth = osp.join(coconet_dir, "hoi_output_finetued.pth")
+        pth_name = "hoi_output_finetued.pth" if output_suffix is None else f"hoi_output_finetued_{output_suffix}.pth"
+        dst_pth = osp.join(coconet_dir, pth_name)
         if osp.exists(dst_pth):
             os.remove(dst_pth)
         os.replace(latest_pth, dst_pth)
@@ -921,14 +984,16 @@ def export_finetune_visualization(
         if osp.getmtime(src_mp4) < before_ts:
             continue
         if "_input.mp4" in fname:
-            dst_mp4 =  osp.join(exp_dir, "finetuning_input.mp4")
+            out_name = "finetuning_input.mp4" if output_suffix is None else f"finetuning_input_{output_suffix}.mp4"
+            dst_mp4 =  osp.join(exp_dir, out_name)
             if osp.exists(dst_mp4):
                 os.remove(dst_mp4)
             os.replace(src_mp4, dst_mp4)
             copied += 1
             print(f"[viz] renamed video -> {dst_mp4}")
         else:
-            dst_mp4 =  osp.join(exp_dir, "finetuning_output.mp4")
+            out_name = "finetuning_output.mp4" if output_suffix is None else f"finetuning_output_{output_suffix}.mp4"
+            dst_mp4 =  osp.join(exp_dir, out_name)
             if osp.exists(dst_mp4):
                 os.remove(dst_mp4)
             os.replace(src_mp4, dst_mp4)
@@ -949,6 +1014,12 @@ def main() -> None:
     parser.add_argument("--clip_len", type=int, default=32)
     parser.add_argument("--window", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument(
+        "--viz_epochs",
+        type=str,
+        default="32,64,96,128,256",
+        help="Comma-separated epochs (1-based, within this run) to export visualization at epoch end.",
+    )
     parser.add_argument(
         "--config_pth",
         type=str,
@@ -1021,8 +1092,11 @@ def main() -> None:
         window=args.window,
         num_epochs=args.num_epochs,
         config_pth=config_pth,
+        viz_epochs=_parse_epoch_list(args.viz_epochs),
     )
-    export_finetune_visualization(exp_dir=exp_dir, paths=paths, config_pth=config_pth)
+    viz_targets = {ep for ep in _parse_epoch_list(args.viz_epochs) if 1 <= ep <= args.num_epochs}
+    if args.num_epochs not in viz_targets:
+        export_finetune_visualization(exp_dir=exp_dir, paths=paths, config_pth=config_pth)
 
 
 if __name__ == "__main__":

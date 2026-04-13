@@ -174,6 +174,14 @@ class Trainer(object):
             wandb.log(log_dict, step=step)
         if not (self.accelerator.is_main_process and self.tb_writer is not None):
             return
+        # Keep TensorBoard train/* concise for finetuning monitoring.
+        allowed_train_tb_keys = {
+            "train/loss",       # total loss
+            "train/loss_r",     # object rotation loss
+            "train/loss_t",     # object translation loss
+            "train/loss_hum_r", # human pose loss
+            "train/loss_hum_b", # human shape loss
+        }
         legacy_tb_map = {
             "loss_train": "train/loss",
             "loss_train_r": "train/loss_r",
@@ -194,6 +202,8 @@ class Trainer(object):
                 scalar = float(value)
             if scalar is not None:
                 tb_key = legacy_tb_map.get(str(key), str(key))
+                if tb_key.startswith("train/") and tb_key not in allowed_train_tb_keys:
+                    continue
                 if tb_key.startswith("train/") or tb_key.startswith("val/"):
                     self.tb_writer.add_scalar(tb_key, scalar, step)
 
@@ -219,8 +229,7 @@ class Trainer(object):
                 loss, loss_r, loss_t, loss_acc = self.forward_step(batch, cfg, model, vis=step%cfg.vis_every_n_steps==0)
                 if not cfg.no_wandb and accelerator.is_main_process:
                     log_dict = {"loss_train": loss.item(), 'loss_train_r': loss_r.item(),
-                                'loss_train_t': loss_t.item(), 'loss_train_acc': loss_acc.item(),
-                                'lr': optimizer.param_groups[0]['lr']}
+                                'loss_train_t': loss_t.item()}
                     self._log_metrics(log_dict, train_state.step)
                 elif accelerator.is_main_process:
                     # Keep the same core train loss keys in TensorBoard even when wandb is disabled.
@@ -229,17 +238,9 @@ class Trainer(object):
                             "loss_train": loss.item(),
                             "loss_train_r": loss_r.item(),
                             "loss_train_t": loss_t.item(),
-                            "loss_train_acc": loss_acc.item(),
-                            "lr": optimizer.param_groups[0]['lr'],
                         },
                         train_state.step,
                     )
-                if accelerator.is_main_process and self.tb_writer is not None:
-                    self.tb_writer.add_scalar("train/loss", loss.item(), train_state.step)
-                    self.tb_writer.add_scalar("train/loss_r", loss_r.item(), train_state.step)
-                    self.tb_writer.add_scalar("train/loss_t", loss_t.item(), train_state.step)
-                    self.tb_writer.add_scalar("train/loss_acc", loss_acc.item(), train_state.step)
-                    self.tb_writer.add_scalar("train/lr", optimizer.param_groups[0]['lr'], train_state.step)
 
                 # Backward pass - accelerator handles the backward pass
                 accelerator.backward(loss)
@@ -408,7 +409,7 @@ class Trainer(object):
             if self.accelerator.is_main_process:
                 key = 'train' if self.model.training else 'val'
                 self._log_metrics(
-                    {f'loss_t_abs_{key}': loss_t_abs, f'loss_r_abs_{key}': loss_r_abs},
+                    {f'{key}/loss_t_abs': loss_t_abs, f'{key}/loss_r_abs': loss_r_abs},
                     self.train_state.step,
                 )
         elif cfg['loss_type'] == 'l2-abs-delta':
@@ -431,7 +432,7 @@ class Trainer(object):
             if self.accelerator.is_main_process:
                 key = 'train' if self.model.training else 'val'
                 self._log_metrics(
-                    {f'loss_t_abs_{key}': loss_t_abs, f'loss_r_abs_{key}': loss_r_abs},
+                    {f'{key}/loss_t_abs': loss_t_abs, f'{key}/loss_r_abs': loss_r_abs},
                     self.train_state.step,
                 )
         elif cfg['loss_type'] in ['l1-absrot-delta', 'l1-absrot-delta-hum', 'l2-absrot-delta-humabs', 'l1-absrot-delta-humabs', 'l2-absrot-delta-hum']:
@@ -439,6 +440,8 @@ class Trainer(object):
             loss_func = F.l1_loss if 'l1' in cfg['loss_type'] else F.mse_loss
             key = 'train' if self.model.training else 'val'
             loss_dict = {}
+            # Keep r/t logging in delta space regardless of training loss formulation.
+            loss_r_log, loss_t_log = None, None
 
             # model predicts both delta and abs pose, abs pose contains rotation only
             frame_mask = batch['frame_mask'].unsqueeze(-1) # (B, T, 1)
@@ -463,6 +466,8 @@ class Trainer(object):
                                                                                                 -1) * frame_mask).mean() * cfg['w_rot']
                     loss_dict[f'{key}/loss_t_raw'] = loss_t_raw
                     loss_dict[f'{key}/loss_r_raw'] = loss_r_raw
+                    loss_t_log = loss_t_raw
+                    loss_r_log = loss_r_raw
 
             else:
                 if self.cfg.symm_loss:
@@ -476,10 +481,14 @@ class Trainer(object):
                     # same for translation
                     loss_t = loss_func(B_in_cams_interm[:, :, None, :3, 3], pose_gt_symm[:, :, :, :3, 3], reduction='none').sum(dim=(-1)).min(-1)[0] # (B, T, N)
                     loss_t = (loss_t[:, :, None] * frame_mask).mean() * cfg['w_transl']
+                    # Log object r/t in delta space even when symmetry loss is computed in absolute pose space.
+                    loss_t_log = (loss_func(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs, t, -1) * frame_mask).mean() * cfg['w_transl']
+                    loss_r_log = (loss_func(rot_delta_pred, rot_delta_gt, reduction='none').reshape(bs, t, -1) * frame_mask).mean() * cfg['w_rot']
                 else:
                     loss_t = (loss_func(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs, t, -1)*frame_mask).mean()* cfg['w_transl']
                     loss_r = (loss_func(rot_delta_pred, rot_delta_gt, reduction='none').reshape(bs, t, -1)*frame_mask).mean() * cfg['w_rot']
-
+                    loss_t_log = loss_t
+                    loss_r_log = loss_r
 
             # abs pose error, TODO: also add symmetry loss here 
             pose_gt = batch['pose_gt']  # (B, T, 4, 4)
@@ -502,7 +511,7 @@ class Trainer(object):
 
             loss_t_abs = torch.tensor(0, device=rot_delta_gt.device) # abs do not correct translation
             loss = loss_r + loss_t + loss_r_abs + loss_t_abs
-            loss_dict.update(**{f'loss_t_abs_{key}': loss_t_abs, f'loss_r_abs_{key}': loss_r_abs})
+            loss_dict.update(**{f'{key}/loss_t_abs': loss_t_abs, f'{key}/loss_r_abs': loss_r_abs})
 
             # velocity of the abs object pose 
 
@@ -534,8 +543,8 @@ class Trainer(object):
                                 loss_hum_r_raw = (loss_func(smpl_delta_r, gt_delta_r, reduction='none').reshape(bs, t, -1) * frame_mask).mean() * self.cfg.w_hum_rot
                                 loss_dict[f'{key}/loss_hum_r_raw'] = loss_hum_r_raw
                                 loss_dict[f'{key}/loss_hum_t_raw'] = loss_hum_t_raw
-                        loss_dict[f'loss_hum_r_{key}'] = loss_hum_r
-                        loss_dict[f'loss_hum_t_{key}'] = loss_hum_t
+                        loss_dict[f'{key}/loss_hum_r'] = loss_hum_r
+                        loss_dict[f'{key}/loss_hum_t'] = loss_hum_t
 
                         loss_hum_j = 0. # joints position loss
                         if self.cfg.w_hum_j > 0.:
@@ -573,7 +582,7 @@ class Trainer(object):
                         if self.cfg.w_hum_b > 0:
                             loss_hum_b = (loss_func(betas, batch['betas_gt'].reshape(-1, 10), reduction='none').reshape(bs, t, -1)*frame_mask).mean() * self.cfg.w_hum_b
                             loss_dict[f'{key}/loss_hum_b'] = loss_hum_b
-                        loss_dict[f'loss_hum_j_{key}'] = loss_hum_j
+                        loss_dict[f'{key}/loss_hum_j'] = loss_hum_j
 
                         # add velocity loss
                         loss_velo = 0.
@@ -607,7 +616,9 @@ class Trainer(object):
                                 loss_contact = loss_mse
                         
                         loss += loss_hum_t + loss_hum_r + loss_hum_j + loss_hum_b + loss_velo + loss_contact
-                        print(f'step {self.train_state.step} hum_r:{loss_hum_r:.3f}, hum_t:{loss_hum_t:.3f}, hum_j: {loss_hum_j:.3f}, hum_b: {loss_hum_b:.3f}, velo: {loss_velo:.3f}, r_abs:{loss_r_abs:.3f}, t_abs:{loss_t_abs:.3f}, r: {loss_r:.3f}, t: {loss_t:.3f}, contact: {loss_contact:.3f}, tot: {loss:.3f}')
+                        r_show = loss_r_log if loss_r_log is not None else loss_r
+                        t_show = loss_t_log if loss_t_log is not None else loss_t
+                        print(f'step {self.train_state.step} hum_r:{loss_hum_r:.3f}, hum_t:{loss_hum_t:.3f}, hum_j: {loss_hum_j:.3f}, hum_b: {loss_hum_b:.3f}, velo: {loss_velo:.3f}, r_abs:{loss_r_abs:.3f}, t_abs:{loss_t_abs:.3f}, r: {r_show:.3f}, t: {t_show:.3f}, contact: {loss_contact:.3f}, tot: {loss:.3f}')
                     else:
                         raise NotImplementedError
                 elif cfg.loss_type in ['l2-absrot-delta-humabs', 'l1-absrot-delta-humabs']:
@@ -627,9 +638,9 @@ class Trainer(object):
                     loss_hum_j = (loss_func(jts_pr, jts_gt, reduction='none').reshape(bs, t, -1)*frame_mask).mean().item() * self.cfg.w_hum_j
                     loss += loss_hum_t + loss_hum_r + loss_hum_j
 
-                    loss_dict[f'loss_hum_r_{key}'] = loss_hum_r
-                    loss_dict[f'loss_hum_t_{key}'] = loss_hum_t
-                    loss_dict[f'loss_hum_j_{key}'] = loss_hum_j
+                    loss_dict[f'{key}/loss_hum_r'] = loss_hum_r
+                    loss_dict[f'{key}/loss_hum_t'] = loss_hum_t
+                    loss_dict[f'{key}/loss_hum_j'] = loss_hum_j
 
 
             if self.accelerator.is_main_process:
@@ -684,6 +695,12 @@ class Trainer(object):
         else:
             raise RuntimeError
 
+        # For training logs/TensorBoard, expose delta-space object r/t when available.
+        if cfg['loss_type'] in ['l1-absrot-delta', 'l1-absrot-delta-hum', 'l2-absrot-delta-humabs', 'l1-absrot-delta-humabs', 'l2-absrot-delta-hum']:
+            if loss_r_log is not None:
+                loss_r = loss_r_log
+            if loss_t_log is not None:
+                loss_t = loss_t_log
         return loss, loss_r, loss_t, loss_acc
 
     def forward_batch(self, batch, cfg, model, vis=False, ret_dict=False):
