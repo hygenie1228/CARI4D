@@ -4,6 +4,8 @@ zfar: 'Infinity'
 debug: 2
 
 symm_loss: false
+batch_size: 4
+num_workers: 4
 
 # loss weights for finetuning
 w_rot: 1.0       # Object delta rotation loss weight (rot vs delta-rot GT)
@@ -13,7 +15,8 @@ w_hum_rot: 1.0   # Human pose rotation loss weight
 w_hum_t: 1.0     # Human translation loss weight
 w_hum_j: 2.0     # Human joint position loss weight
 w_hum_b: 0.1     # Human shape (betas) loss weight
-w_velo: 0.0      # Human/object temporal velocity regularization weight
+w_hum_velo: 0.0  # Human temporal velocity regularization weight
+w_obj_velo: 1.0  # Object temporal velocity regularization weight
 w_contact: 0.1   # Contact prediction loss weight
 
 # w_rot: 0.1       # Object delta rotation loss weight (rot vs delta-rot GT)
@@ -25,9 +28,9 @@ w_contact: 0.1   # Contact prediction loss weight
 # w_hum_t: 0.1     # Human translation loss weight
 # w_hum_j: 0.0     # Human joint position loss weight
 # w_hum_b: 0.0     # Human shape (betas) loss weight
-# w_velo: 0.0      # Human/object temporal velocity regularization weight
+# w_hum_velo: 0.0  # Human temporal velocity regularization weight
+# w_obj_velo: 0.0  # Object temporal velocity regularization weight
 # w_contact: 0.0   # Contact prediction loss weight
-# w_velo_obj: 0.0  # Object-only velocity loss weight (for other training modes)
 # w_diff_l2: 10.0  # Diffusion branch L2 loss weight (for diffusion training modes)
 # w_heatmap: 0.0   # Contact heatmap loss weight (if heatmap supervision is enabled)
 
@@ -81,7 +84,6 @@ lr_scheduler:
 
 # data format
 trans_rep: tracknet
-batch_size: 2
 crop_ratio: 1.2
 use_normal: false
 BN_momentum: 0.1
@@ -115,7 +117,7 @@ trans_normalizer:
 - 0.5
 - 0.5
 val_epoch_interval: 10
-num_workers: 3
+
 
 split_file: 'splits/behave+hodome.json'
 exclude_frames: 'splits/behave-30fps-exclude.json'

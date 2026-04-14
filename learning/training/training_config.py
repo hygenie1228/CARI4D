@@ -404,8 +404,8 @@ class TrainTemporalRefinerConfig:
     w_hum_t: float = 0.1
     w_hum_j: float = 0 # joint locations
     w_hum_b: float = 0 # body shape loss
-    w_velo: float = 0.0 # velocity loss for combined motion 
-    w_velo_obj: float = 0.0 # velocity loss for object motion  
+    w_hum_velo: float = 0.0 # velocity loss for human motion
+    w_obj_velo: float = 0.0 # velocity loss for object motion
     w_diff_l2: float = 10.0 
     w_contact: float = 0. # explicit contacts after joints are computed 
     w_heatmap: float = 0.0 # heatmap loss for contact points 

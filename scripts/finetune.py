@@ -770,8 +770,6 @@ def run_finetune(
         "exclude_frames=null",
         f"clip_len={clip_len}",
         f"window={window}",
-        "batch_size=1",
-        "num_workers=0",
         "val_at_start=False",
         "val_step_interval=1000000",
         "ckpt_interval=1000000",

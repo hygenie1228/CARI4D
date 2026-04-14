@@ -181,6 +181,8 @@ class Trainer(object):
             "train/loss_t",     # object translation loss
             "train/loss_hum_r", # human pose loss
             "train/loss_hum_b", # human shape loss
+            "train/loss_hum_velo",  # human joint velocity loss (weighted)
+            "train/loss_obj_velo",  # object translation velocity loss (weighted)
         }
         legacy_tb_map = {
             "loss_train": "train/loss",
@@ -586,18 +588,28 @@ class Trainer(object):
 
                         # add velocity loss
                         loss_velo = 0.
-                        if self.cfg.w_velo > 0:
-                            # Oct29 midnight: v2: for human use the joint loss and object use the translation loss
+                        if self.cfg.w_hum_velo > 0 or self.cfg.w_obj_velo > 0:
+                            # Apply separate velocity regularizers for human joints and object translation.
                             jts_pr = jts_pr.reshape(bs, t, -1, 3)
-                            jts_gt = batch['smpl_jtrs_gt'] 
-                            velo_pr_hj = jts_pr[:, 1:] - jts_pr[:, :-1]
-                            velo_gt_hj = jts_gt[:, 1:] - jts_gt[:, :-1]
-                            velo_pr_ot = B_in_cams_interm[:, 1:, :3, 3] - B_in_cams_interm[:, :-1, :3, 3]
-                            velo_gt_ot = pose_gt[:, 1:, :3, 3] - pose_gt[:, :-1, :3, 3]
-                            loss_velo_hj = F.mse_loss(velo_pr_hj, velo_gt_hj, reduction='none').sum(-1).mean() 
-                            loss_velo_ot = F.mse_loss(velo_pr_ot, velo_gt_ot, reduction='none').sum(-1).mean()  
-                            loss_velo = (loss_velo_hj + loss_velo_ot) * self.cfg.w_velo
-                            loss_dict[f'{key}/loss_velo'] = loss_velo
+                            jts_gt = batch['smpl_jtrs_gt']
+                            loss_velo_hj = torch.tensor(0.0, device=rot_delta_gt.device)
+                            loss_velo_ot = torch.tensor(0.0, device=rot_delta_gt.device)
+                            if self.cfg.w_hum_velo > 0:
+                                velo_pr_hj = jts_pr[:, 1:] - jts_pr[:, :-1]
+                                velo_gt_hj = jts_gt[:, 1:] - jts_gt[:, :-1]
+                                loss_velo_hj = F.mse_loss(velo_pr_hj, velo_gt_hj, reduction='none').sum(-1).mean()
+                            if self.cfg.w_obj_velo > 0:
+                                B_in_cams_interm = self.abspose_from_relative(
+                                    batch, cfg, batch['pose_perturbed'], out_dict['rot'], out_dict['trans']
+                                )
+                                velo_pr_ot = B_in_cams_interm[:, 1:, :3, 3] - B_in_cams_interm[:, :-1, :3, 3]
+                                velo_gt_ot = pose_gt[:, 1:, :3, 3] - pose_gt[:, :-1, :3, 3]
+                                loss_velo_ot = F.mse_loss(velo_pr_ot, velo_gt_ot, reduction='none').sum(-1).mean()
+                            loss_hum_velo = loss_velo_hj * self.cfg.w_hum_velo
+                            loss_obj_velo = loss_velo_ot * self.cfg.w_obj_velo
+                            loss_velo = loss_hum_velo + loss_obj_velo
+                            loss_dict[f'{key}/loss_hum_velo'] = loss_hum_velo
+                            loss_dict[f'{key}/loss_obj_velo'] = loss_obj_velo
                         # contact prediction
                         loss_contact = 0.
                         if self.cfg.cont_out_dim > 0 and ('contact_dist_gt' in batch) and ('contact' in out_dict):
