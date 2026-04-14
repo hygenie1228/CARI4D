@@ -273,7 +273,7 @@ class VideoDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.start_inds)
+        return len(self.start_inds) * 16
 
     def get_chunk_files(self, idx):
         """
@@ -299,6 +299,9 @@ class VideoDataset(Dataset):
             assert seq == seq_name, f'{file} seq name incompatible with {image_files[0]}'
 
     def __getitem__(self, idx):
+        # [nhj warn] for debugging
+        idx = 0
+
         try:
             data_dict = self.get_item(idx)
             return data_dict

@@ -13,6 +13,7 @@ with minimal custom glue code:
 from __future__ import annotations
 
 import argparse
+import math
 import shutil
 import json
 import os
@@ -32,6 +33,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
+from omegaconf import OmegaConf
 
 
 ROOT = osp.dirname(osp.dirname(osp.abspath(__file__)))
@@ -133,6 +135,19 @@ def _load_human_gt(human_gt_npz: str, n_frames: int) -> dict:
     }
 
 
+def _slice_human_gt(data: dict, start_frame: int, n_frames: int) -> dict:
+    end = start_frame + n_frames
+    if data["poses"].shape[0] < end:
+        raise ValueError(f"human GT has fewer frames than requested slice: end={end}, total={data['poses'].shape[0]}")
+    return {
+        "poses": data["poses"][start_frame:end].copy(),
+        "betas": data["betas"][start_frame:end].copy(),
+        "trans": data["trans"][start_frame:end].copy(),
+        "intrinsics": data["intrinsics"].copy(),
+        "gender": data["gender"],
+    }
+
+
 def _load_object_gt(object_gt_npz: str, n_frames: int) -> dict:
     z = np.load(object_gt_npz, allow_pickle=True)
     required = ["angle", "trans"]
@@ -144,6 +159,16 @@ def _load_object_gt(object_gt_npz: str, n_frames: int) -> dict:
     if angle.shape != trans.shape or angle.ndim != 2 or angle.shape[1] != 3:
         raise ValueError(f"invalid object GT shapes angle={angle.shape}, trans={trans.shape}")
     return {"angle": angle, "trans": trans}
+
+
+def _slice_object_gt(data: dict, start_frame: int, n_frames: int) -> dict:
+    end = start_frame + n_frames
+    if data["angle"].shape[0] < end:
+        raise ValueError(f"object GT has fewer frames than requested slice: end={end}, total={data['angle'].shape[0]}")
+    return {
+        "angle": data["angle"][start_frame:end].copy(),
+        "trans": data["trans"][start_frame:end].copy(),
+    }
 
 
 def _compute_human_joints(poses: np.ndarray, betas: np.ndarray, trans: np.ndarray, gender: str) -> tuple[np.ndarray, np.ndarray]:
@@ -176,6 +201,7 @@ def _write_support_files(
     human_sup: dict,
     obj_sup: dict,
     n_frames: int,
+    frame_start: int = 0,
 ) -> PreparedPaths:
     data_root = osp.join(exp_dir, "data")
     render_root = osp.join(data_root, "render")
@@ -186,7 +212,7 @@ def _write_support_files(
     for d in (render_root, packed_root, nlf_root, fp_root, splits_root):
         os.makedirs(d, exist_ok=True)
 
-    frames = [f"{i:06d}" for i in range(n_frames)]
+    frames = [f"{frame_start + i:06d}" for i in range(n_frames)]
     # NLF/FP initial states should come from init npz.
     nlf = {
         "poses": human_init["poses"][:, None, :].astype(np.float32),
@@ -254,6 +280,7 @@ def _write_render_h5_simple(
     intrinsics: np.ndarray,
     n_frames: int,
     input_size: int,
+    frame_start: int = 0,
 ) -> None:
     """Legacy: use RGB video as synthetic `render` and flat depth (no mesh)."""
     video_path = osp.join(exp_dir, "video.mp4")
@@ -273,7 +300,9 @@ def _write_render_h5_simple(
     if not ok0 or rgb0 is None:
         raise RuntimeError(f"failed to read first frame from {video_path}")
     h0, w0 = rgb0.shape[:2]
-    cap_rgb.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    cap_rgb.set(cv2.CAP_PROP_POS_FRAMES, float(frame_start))
+    cap_h.set(cv2.CAP_PROP_POS_FRAMES, float(frame_start))
+    cap_o.set(cv2.CAP_PROP_POS_FRAMES, float(frame_start))
     sx = float(input_size) / float(w0)
     sy = float(input_size) / float(h0)
     fx, fy, cx, cy = [float(x) for x in intrinsics[:4]]
@@ -350,6 +379,7 @@ def _write_render_h5_run_demo_style(
     fp_all_pkl: str,
     n_frames: int,
     input_size: int,
+    frame_start: int = 0,
 ) -> None:
     """Match `run_demo.py` / `run_horefine.run_1seq` per-frame packaging (mask crop, depth video, SMPL+obj render)."""
     import shutil
@@ -597,11 +627,16 @@ def _write_render_h5(
     input_size: int,
     *,
     simple_render: bool,
+    frame_start: int = 0,
 ) -> None:
     if simple_render:
-        _write_render_h5_simple(exp_dir, paths, fp_all_pkl, intrinsics, n_frames, input_size)
+        _write_render_h5_simple(
+            exp_dir, paths, fp_all_pkl, intrinsics, n_frames, input_size, frame_start=frame_start
+        )
     else:
-        _write_render_h5_run_demo_style(exp_dir, paths, fp_all_pkl, n_frames, input_size)
+        _write_render_h5_run_demo_style(
+            exp_dir, paths, fp_all_pkl, n_frames, input_size, frame_start=frame_start
+        )
 
 
 def prepare_data(
@@ -609,6 +644,8 @@ def prepare_data(
     human_gt_npz: str,
     object_gt_npz: str,
     max_frames: int | None,
+    start_frame: int | None,
+    end_frame: int | None,
     input_size: int,
     simple_render: bool,
     force_rebuild: bool = False,
@@ -642,24 +679,46 @@ def prepare_data(
     object_mask_path = osp.join(exp_dir, "processed", "object_mask.mp4")
     depth_path = osp.join(exp_dir, "processed", "depth.mp4")
     depth_for_count = None if simple_render else depth_path
-    n_frames = _min_frame_count(
-        video_path, human_mask_path, object_mask_path, max_frames, depth_for_count
+    n_available = _min_frame_count(
+        video_path, human_mask_path, object_mask_path, None, depth_for_count
     )
-    print(f"[prepare] sequence={seq_name}, frames={n_frames}")
+    frame_start = 0 if start_frame is None else int(start_frame)
+    if frame_start < 0:
+        raise ValueError(f"start_frame must be >= 0, got {frame_start}")
+    frame_end = (n_available - 1) if end_frame is None else int(end_frame)
+    frame_end = min(frame_end, n_available - 1)
+    if frame_end < frame_start:
+        raise ValueError(
+            f"invalid frame range: start_frame={frame_start}, end_frame={frame_end}, available={n_available}"
+        )
+    n_frames = frame_end - frame_start + 1
+    if max_frames is not None:
+        n_frames = min(n_frames, int(max_frames))
+        frame_end = frame_start + n_frames - 1
+    print(
+        f"[prepare] sequence={seq_name}, frame range={frame_start}..{frame_end}, "
+        f"frames={n_frames} (available={n_available})"
+    )
 
     # `human_gt_npz` / `object_gt_npz` here are treated as initialization inputs.
-    human_init = _load_human_gt(human_gt_npz, n_frames)
-    obj_init = _load_object_gt(object_gt_npz, n_frames)
+    human_init_all = _load_human_gt(human_gt_npz, n_available)
+    obj_init_all = _load_object_gt(object_gt_npz, n_available)
+    human_init = _slice_human_gt(human_init_all, frame_start, n_frames)
+    obj_init = _slice_object_gt(obj_init_all, frame_start, n_frames)
     # Loss supervision must use GT labels.
     human_sup_npz = osp.join(exp_dir, "human", "human_params_gt.npz")
     object_sup_npz = osp.join(exp_dir, "object", "object_params_gt.npz")
     if not osp.isfile(human_sup_npz) or not osp.isfile(object_sup_npz):
         missing = [p for p in (human_sup_npz, object_sup_npz) if not osp.isfile(p)]
         raise FileNotFoundError(f"missing required GT supervision npz: {missing}")
-    human_sup = _load_human_gt(human_sup_npz, n_frames)
-    obj_sup = _load_object_gt(object_sup_npz, n_frames)
+    human_sup_all = _load_human_gt(human_sup_npz, n_available)
+    obj_sup_all = _load_object_gt(object_sup_npz, n_available)
+    human_sup = _slice_human_gt(human_sup_all, frame_start, n_frames)
+    obj_sup = _slice_object_gt(obj_sup_all, frame_start, n_frames)
     print(f"[prepare] supervision labels: GT ({human_sup_npz}, {object_sup_npz})")
-    paths = _write_support_files(exp_dir, seq_name, human_init, obj_init, human_sup, obj_sup, n_frames)
+    paths = _write_support_files(
+        exp_dir, seq_name, human_init, obj_init, human_sup, obj_sup, n_frames, frame_start=frame_start
+    )
     _write_render_h5(
         exp_dir=exp_dir,
         paths=paths,
@@ -668,6 +727,7 @@ def prepare_data(
         n_frames=n_frames,
         input_size=input_size,
         simple_render=simple_render,
+        frame_start=frame_start,
     )
     print(f"[prepare] render={osp.join(paths.render_root, f'{seq_name}_render.h5')}")
     return paths
@@ -683,6 +743,52 @@ def run_finetune(
     config_pth: str,
     viz_epochs: list[int],
 ) -> None:
+    def _make_model_init_checkpoint(src_ckpt: str, out_dir: str) -> str:
+        """Create a finetune init checkpoint without optimizer/scheduler/history states."""
+        dst_ckpt = osp.join(out_dir, "step000000_init_model_only.pth")
+        try:
+            ckpt = torch.load(src_ckpt, map_location="cpu", weights_only=False)
+        except Exception as ex:
+            print(f"[train] warning: failed to sanitize checkpoint {src_ckpt}: {ex}")
+            return src_ckpt
+
+        if isinstance(ckpt, dict) and "model" in ckpt:
+            model_state = ckpt["model"]
+        elif isinstance(ckpt, dict):
+            # Some checkpoints store state_dict directly.
+            model_state = ckpt
+        else:
+            print(f"[train] warning: unsupported checkpoint format at {src_ckpt}; using as-is")
+            return src_ckpt
+
+        init_ckpt = {
+            "model": model_state,
+            "epoch": 0,
+            "step": 0,
+            "best_val": None,
+        }
+        torch.save(init_ckpt, dst_ckpt)
+        print(f"[train] created model-only init checkpoint: {dst_ckpt}")
+        return dst_ckpt
+
+    def _estimate_steps_per_epoch() -> int:
+        packed_file = osp.join(paths.packed_root, f"{paths.seq_name}_GT-packed.pkl")
+        if not osp.isfile(packed_file):
+            return 1
+        packed = joblib.load(packed_file)
+        n_frames = len(packed.get("frames", []))
+        if n_frames <= 0:
+            return 1
+        if n_frames < clip_len:
+            return 1
+        windows_per_view = ((n_frames - clip_len) // window) + 1
+        # VideoDataset uses one selected view in this finetune command path (job=test),
+        # then __len__ multiplies by 4.
+        dataset_len = max(1, windows_per_view * 4)
+        cfg = OmegaConf.load(config_pth)
+        bs = int(getattr(cfg, "batch_size", 1) or 1)
+        return max(1, math.ceil(dataset_len / bs))
+
     def _write_dummy_obj(path: str) -> None:
         os.makedirs(osp.dirname(path), exist_ok=True)
         if osp.isfile(path):
@@ -748,7 +854,8 @@ def run_finetune(
     if step_ckpts:
         print(f"[train] resume from latest checkpoint: {ckpt_for_train}")
     else:
-        print(f"[train] no prior step checkpoint found; start from base checkpoint: {ckpt_for_train}")
+        ckpt_for_train = _make_model_init_checkpoint(base_ckpt, train_exp_dir)
+        print(f"[train] no prior step checkpoint found; start from model-only init checkpoint: {ckpt_for_train}")
 
     common_cmd = [
         sys.executable,
@@ -778,7 +885,19 @@ def run_finetune(
     ]
 
     def _run_train_chunk(chunk_epochs: int, ckpt_file: str) -> None:
-        cmd = common_cmd + [f"ckpt_file={ckpt_file}", f"num_epochs={chunk_epochs}"]
+        steps_per_epoch = _estimate_steps_per_epoch()
+        # Use full planned finetune horizon for scheduler, not per-viz chunk horizon.
+        num_training_steps = max(1, steps_per_epoch * num_epochs)
+        cmd = common_cmd + [
+            f"ckpt_file={ckpt_file}",
+            f"num_epochs={chunk_epochs}",
+            # Keep scheduler horizon aligned with full finetune run in step units.
+            f"lr_scheduler.kwargs.num_training_steps={num_training_steps}",
+        ]
+        print(
+            f"[train] scheduler num_training_steps={num_training_steps} "
+            f"(steps/epoch={steps_per_epoch}, total_epochs={num_epochs}, chunk_epochs={chunk_epochs})"
+        )
         print("[train] running command:")
         print(" ".join(cmd))
         subprocess.run(cmd, check=True, cwd=ROOT)
@@ -1008,6 +1127,8 @@ def main() -> None:
     parser.add_argument("--human_gt_npz", type=str, default=None)
     parser.add_argument("--object_gt_npz", type=str, default=None)
     parser.add_argument("--max_frames", type=int, default=None)
+    parser.add_argument("--start_frame", type=int, default=None)
+    parser.add_argument("--end_frame", type=int, default=None)
     parser.add_argument("--input_size", type=int, default=224)
     parser.add_argument("--clip_len", type=int, default=32)
     parser.add_argument("--window", type=int, default=16)
@@ -1015,7 +1136,7 @@ def main() -> None:
     parser.add_argument(
         "--viz_epochs",
         type=str,
-        default="32,64,96,128,256",
+        default="8,16,32,64,128,256,384,512",
         help="Comma-separated epochs (1-based, within this run) to export visualization at epoch end.",
     )
     parser.add_argument(
@@ -1065,12 +1186,16 @@ def main() -> None:
             print(f" - {p}", file=sys.stderr)
         sys.exit(1)
 
-    force_rebuild = args.force_rebuild or (args.num_epochs <= 0)
+    if (args.start_frame is not None or args.end_frame is not None) and not args.force_rebuild:
+        print("[prepare] start_frame/end_frame is set; enabling force_rebuild=True to apply slicing.")
+    force_rebuild = args.force_rebuild or (args.num_epochs <= 0) or (args.start_frame is not None) or (args.end_frame is not None)
     paths = prepare_data(
         exp_dir=exp_dir,
         human_gt_npz=human_gt_npz,
         object_gt_npz=object_gt_npz,
         max_frames=args.max_frames,
+        start_frame=args.start_frame,
+        end_frame=args.end_frame,
         input_size=args.input_size,
         simple_render=args.simple_render,
         force_rebuild=force_rebuild,

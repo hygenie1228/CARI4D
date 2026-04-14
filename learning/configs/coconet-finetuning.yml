@@ -10,7 +10,7 @@ num_workers: 4
 # loss weights for finetuning
 w_rot: 1.0       # Object delta rotation loss weight (rot vs delta-rot GT)
 w_transl: 1.0    # Object delta translation loss weight (trans vs delta-trans GT)
-w_abs_rot: 1.0   # Object absolute rotation loss weight (rot_abs vs abs-rot GT)
+w_abs_rot: 0.0   # Object absolute rotation loss weight (rot_abs vs abs-rot GT)
 w_hum_rot: 1.0   # Human pose rotation loss weight
 w_hum_t: 1.0     # Human translation loss weight
 w_hum_j: 2.0     # Human joint position loss weight
@@ -81,6 +81,13 @@ lr_scheduler:
     name: 'linear'
     num_warmup_steps: 0
     num_training_steps: 250000 # this is for single GPU, actual steps will be scaled by num_gpus
+
+# lr_scheduler:
+#   type: 'cosine' # options: cosine, cosine_with_restarts, transformers, torch
+#   kwargs:
+#     num_warmup_steps: 0
+#     num_training_steps: 250000 # this is for single GPU, actual steps will be scaled by num_gpus
+#     num_cycles: 0.5 # cosine default (half-wave). Increase for more oscillations.
 
 # data format
 trans_rep: tracknet

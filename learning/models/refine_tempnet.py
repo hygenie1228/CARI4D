@@ -518,11 +518,13 @@ class DINOTempHORefineDeltaAndAbs(DINOTempRefineNet):
     def pred_head_forward(self, x, batch, B):
         # x: (BT, HW, C)
         output = {}
-        if self.cfg.train_smpl_only:
+        if True: # self.cfg.train_smpl_only:
             # set the trans and rot to GT
             b, rot_delta_gt, t, trans_delta_gt = self.comput_gt_obj_delta(B, batch)
             output['rot'] = rot_delta_gt.reshape(b * t, -1)
-            output['trans'] = trans_delta_gt.reshape(b * t, -1)  # use GT pose
+            # output['trans'] = trans_delta_gt.reshape(b * t, -1)  # use GT pose
+            trans_out = self.trans_head(x).mean(dim=1)
+            output['trans'] = trans_out # (bt, 3)
         else:
             trans_out = self.trans_head(x).mean(dim=1)
             rot_out = self.rot_head(x).mean(dim=1)

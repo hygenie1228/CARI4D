@@ -11,6 +11,7 @@ trainer
 """
 import sys, os
 import time
+import hashlib
 
 import cv2
 import trimesh
@@ -56,6 +57,7 @@ class Trainer(object):
         model = get_model(cfg)
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
         self.train_state = TrainState()
+        loaded_scheduler_state = False
         if cfg.lr_scheduler.type == 'none':
             scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
         else:
@@ -119,6 +121,7 @@ class Trainer(object):
             fp_ckpt_file = ckpt_files[-1]
             if 'scheduler' in ckpt:
                 scheduler.load_state_dict(ckpt['scheduler'])
+                loaded_scheduler_state = True
             else:
                 print('No scheduler states found in the ckpt!')
 
@@ -137,6 +140,28 @@ class Trainer(object):
         )
         self.accelerator = accelerator
         self.dataset_test = dataset_test
+
+        # For fresh finetune starts, align scheduler horizon with actual train iterations.
+        # Keep resumed scheduler state untouched when loaded from checkpoint.
+        if (not loaded_scheduler_state) and cfg.lr_scheduler.type in ['transformers', 'cosine', 'cosine_with_restarts']:
+            steps_per_epoch = max(1, len(self.train_dataloader))
+            old_total = None
+            requested_total = None
+            if hasattr(cfg.lr_scheduler, "kwargs") and "num_training_steps" in cfg.lr_scheduler.kwargs:
+                try:
+                    old_total = int(cfg.lr_scheduler.kwargs["num_training_steps"])
+                    requested_total = old_total
+                except Exception:
+                    old_total = None
+            # Respect explicitly provided num_training_steps (e.g., finetune script override).
+            # Otherwise fallback to steps_per_epoch * cfg.num_epochs.
+            total_steps = requested_total if (requested_total is not None and requested_total > 0) else max(1, steps_per_epoch * int(cfg.num_epochs))
+            cfg.lr_scheduler.kwargs["num_training_steps"] = int(total_steps)
+            self.scheduler = get_scheduler(cfg, self.optimizer)
+            print(
+                f"[scheduler] set num_training_steps={total_steps} "
+                f"(steps/epoch={steps_per_epoch}, num_epochs={cfg.num_epochs}, requested={requested_total}, old={old_total})"
+            )
 
         # init logging
         self.tb_writer = None
@@ -167,6 +192,20 @@ class Trainer(object):
         if cfg.nlf_root is not None:
             self.smpl_male = get_smpl('male', True).cuda()
             self.smpl_female = get_smpl('female', True).cuda()
+        self._coconet_input_history = []
+
+    @staticmethod
+    def _tensor_fingerprint(tensor: torch.Tensor, sample_size: int = 4096) -> str:
+        """Compute a stable lightweight hash for large tensor comparison."""
+        # Move first to CPU to avoid any CUDA indexing kernels in debug utility code.
+        flat = tensor.detach().to(dtype=torch.float32, device="cpu").reshape(-1)
+        if flat.numel() == 0:
+            return "empty"
+        if flat.numel() > sample_size:
+            step = max(1, flat.numel() // sample_size)
+            flat = flat[::step][:sample_size]
+        arr = flat.numpy()
+        return hashlib.sha1(arr.tobytes()).hexdigest()
 
     def _log_metrics(self, log_dict: dict, step: int) -> None:
         """Log to wandb (if enabled) and TensorBoard (scalars only)."""
@@ -179,6 +218,7 @@ class Trainer(object):
             "train/loss",       # total loss
             "train/loss_r",     # object rotation loss
             "train/loss_t",     # object translation loss
+            "train/lr",         # learning rate
             "train/loss_hum_r", # human pose loss
             "train/loss_hum_b", # human shape loss
             "train/loss_hum_velo",  # human joint velocity loss (weighted)
@@ -231,7 +271,7 @@ class Trainer(object):
                 loss, loss_r, loss_t, loss_acc = self.forward_step(batch, cfg, model, vis=step%cfg.vis_every_n_steps==0)
                 if not cfg.no_wandb and accelerator.is_main_process:
                     log_dict = {"loss_train": loss.item(), 'loss_train_r': loss_r.item(),
-                                'loss_train_t': loss_t.item()}
+                                'loss_train_t': loss_t.item(), 'lr': optimizer.param_groups[0]["lr"]}
                     self._log_metrics(log_dict, train_state.step)
                 elif accelerator.is_main_process:
                     # Keep the same core train loss keys in TensorBoard even when wandb is disabled.
@@ -240,6 +280,7 @@ class Trainer(object):
                             "loss_train": loss.item(),
                             "loss_train_r": loss_r.item(),
                             "loss_train_t": loss_t.item(),
+                            "lr": optimizer.param_groups[0]["lr"],
                         },
                         train_state.step,
                     )
@@ -487,10 +528,28 @@ class Trainer(object):
                     loss_t_log = (loss_func(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs, t, -1) * frame_mask).mean() * cfg['w_transl']
                     loss_r_log = (loss_func(rot_delta_pred, rot_delta_gt, reduction='none').reshape(bs, t, -1) * frame_mask).mean() * cfg['w_rot']
                 else:
-                    loss_t = (loss_func(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs, t, -1)*frame_mask).mean()* cfg['w_transl']
-                    loss_r = (loss_func(rot_delta_pred, rot_delta_gt, reduction='none').reshape(bs, t, -1)*frame_mask).mean() * cfg['w_rot']
-                    loss_t_log = loss_t
-                    loss_r_log = loss_r
+                    B_in_cams_interm = self.abspose_from_relative(
+                        batch, cfg, batch['pose_perturbed'], out_dict['rot'], out_dict['trans']
+                    )  # (B, T, 4, 4)
+                    pose_gt = batch['pose_gt']  # (B, T, 4, 4)
+                    loss_r = loss_func(
+                        B_in_cams_interm[:, :, :3, :3], pose_gt[:, :, :3, :3], reduction='none'
+                    ).sum(dim=(-1, -2))
+                    loss_r = (loss_r[:, :, None] * frame_mask).mean() * cfg['w_rot']
+                    loss_t = loss_func(
+                        B_in_cams_interm[:, :, :3, 3], pose_gt[:, :, :3, 3], reduction='none'
+                    ).sum(dim=(-1))
+                    loss_t = (loss_t[:, :, None] * frame_mask).mean() * cfg['w_transl']
+
+                    # Log object r/t in delta space even when symmetry loss is computed in absolute pose space.
+                    loss_t_log = (loss_func(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs, t, -1) * frame_mask).mean() * cfg['w_transl']
+                    loss_r_log = (loss_func(rot_delta_pred, rot_delta_gt, reduction='none').reshape(bs, t, -1) * frame_mask).mean() * cfg['w_rot']
+
+                    # Original
+                    # loss_t = (loss_func(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs, t, -1)*frame_mask).mean()* cfg['w_transl']
+                    # loss_r = (loss_func(rot_delta_pred, rot_delta_gt, reduction='none').reshape(bs, t, -1)*frame_mask).mean() * cfg['w_rot']
+                    # loss_t_log = loss_t
+                    # loss_r_log = loss_r
 
             # abs pose error, TODO: also add symmetry loss here 
             pose_gt = batch['pose_gt']  # (B, T, 4, 4)
@@ -758,6 +817,24 @@ class Trainer(object):
         # print(f"[debug] gt-vs-input pose mae={pose_mae:.6f}, max={pose_max:.6f}, T={t_cmp}, J={j_cmp}")
         # import pdb; pdb.set_trace()
         
+        # WARNING: Debug-only ablation.
+        # This replaces model-predicted object delta rotation with GT immediately after CoCONet output.
+        # Keep disabled in normal training/eval (`debug_force_gt_obj_rot=False`).
+        if True: # getattr(cfg, "debug_force_gt_obj_rot", False):
+            with torch.no_grad():
+                pred_rot_mae = torch.abs(output['rot'].float() - rot_delta_gt).mean()
+                pred_trans_mae = torch.abs(output['trans'].float() - trans_delta_gt.reshape(B * T, 3)).mean()
+            key = 'train' if model.training else 'val'
+            self._log_metrics(
+                {
+                    f'{key}/debug_rot_mae_before_gt_inject': pred_rot_mae,
+                    f'{key}/debug_trans_mae_before_gt_inject': pred_trans_mae,
+                },
+                self.train_state.step,
+            )
+            output['rot'] = rot_delta_gt.detach().clone()
+            # output['trans'] = trans_delta_gt.reshape(B * T, 3).detach().clone()
+
         trans = output['trans'].float()  # (BT,3)
         rot = output['rot'].float()  # BT, 3
         trans_delta_pred = trans

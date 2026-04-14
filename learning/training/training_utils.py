@@ -84,8 +84,14 @@ def get_scheduler(cfg: TrainTemporalRefinerConfig, optimizer: torch.optim.Optimi
     
     # Get scheduler
     if cfg.lr_scheduler.type == 'torch':
-        Scheduler: torch.optim.lr_scheduler._LRScheduler = getattr(torch.optim.lr_scheduler, cfg.lr_scheduler.type)
-        scheduler = Scheduler(optimizer=optimizer, **cfg.lr_scheduler.kwargs)
+        # Example: type=torch, kwargs: {name: CosineAnnealingLR, T_max: 10000}
+        scheduler_name = cfg.lr_scheduler.kwargs.get('name', None)
+        if scheduler_name is None:
+            raise ValueError("For lr_scheduler.type='torch', kwargs.name must be set (e.g., CosineAnnealingLR).")
+        Scheduler: torch.optim.lr_scheduler._LRScheduler = getattr(torch.optim.lr_scheduler, scheduler_name)
+        torch_kwargs = dict(cfg.lr_scheduler.kwargs)
+        torch_kwargs.pop('name', None)
+        scheduler = Scheduler(optimizer=optimizer, **torch_kwargs)
         if cfg.lr_scheduler.get('warmup', 0):
             from warmup_scheduler import GradualWarmupScheduler
             scheduler = GradualWarmupScheduler(optimizer, multiplier=1, 
@@ -97,6 +103,28 @@ def get_scheduler(cfg: TrainTemporalRefinerConfig, optimizer: torch.optim.Optimi
         print(f'using scheduler with configs: {cfg.lr_scheduler.kwargs}')
         from transformers import get_scheduler # default: linear scheduler with warm up and linear decay
         scheduler = get_scheduler(optimizer=optimizer, **cfg.lr_scheduler.kwargs)
+    elif cfg.lr_scheduler.type in ['cosine', 'cosine_with_restarts']:
+        # Convenience aliases over transformers schedulers so yml can switch with type only.
+        from transformers import get_scheduler
+        base_kwargs = dict(cfg.lr_scheduler.kwargs)
+        num_warmup_steps = int(base_kwargs.pop('num_warmup_steps', 0))
+        num_training_steps = int(base_kwargs.pop('num_training_steps'))
+        if cfg.lr_scheduler.type == 'cosine':
+            scheduler = get_scheduler(
+                name='cosine',
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+                **base_kwargs,
+            )
+        else:
+            scheduler = get_scheduler(
+                name='cosine_with_restarts',
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+                **base_kwargs,
+            )
     elif cfg.lr_scheduler.type == 'epoch_half_by':
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, **cfg.lr_scheduler.kwargs)
     elif cfg.lr_scheduler.type == 'step_half_by':
