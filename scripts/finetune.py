@@ -6,7 +6,6 @@ with minimal custom glue code:
 1) Build training assets under `<exp_dir>/data` from GT npz files.
 2) Write `render.h5` like `run_demo.py` → `run_horefine.py`: mask-based crop, `processed/depth.mp4` for input
    XYZ, SMPL+object nvdiffrast in the ROI. Requires `object/model.obj`, depth video, and CUDA.
-   `--simple_render` keeps the old placeholder path (no depth / no live render).
 3) Launch trainer starting from a base checkpoint. Scheduled epochs in `--viz_epochs` export
    `finetuning_{input,output}_epochNNN.mp4` inside the trainer process (same train-dataloader batch),
    via env `FINETUNE_EXP_DIR` / `FINETUNE_VIZ_EPOCHS` — no per-epoch `run_horefine.py` subprocess.
@@ -77,6 +76,42 @@ def _parse_epoch_list(spec: str) -> list[int]:
             raise ValueError(f"epoch values must be positive, got {val}")
         out.append(val)
     return sorted(set(out))
+
+
+def _load_cli_defaults_from_config(config_pth: str) -> dict[str, object]:
+    defaults: dict[str, object] = {
+        "base_ckpt": "data/base_checkpoints/base_coconet.pth",
+        "start_frame": None,
+        "end_frame": None,
+        "clip_len": 32,
+        "window": 16,
+        "num_epochs": 1,
+        "viz_epochs": "16,32,64,128,256,384,512",
+    }
+    if not osp.isfile(config_pth):
+        return defaults
+    try:
+        cfg = OmegaConf.load(config_pth)
+    except Exception as e:
+        print(f"[config] warning: failed to load {config_pth}: {e}; using CLI hardcoded defaults.")
+        return defaults
+
+    def _cfg_get(key: str, fallback: object) -> object:
+        val = OmegaConf.select(cfg, key, default=fallback)
+        return fallback if val is None else val
+
+    defaults["base_ckpt"] = str(_cfg_get("base_ckpt", defaults["base_ckpt"]))
+    defaults["start_frame"] = _cfg_get("start_frame", defaults["start_frame"])
+    defaults["end_frame"] = _cfg_get("end_frame", defaults["end_frame"])
+    defaults["clip_len"] = int(_cfg_get("clip_len", defaults["clip_len"]))
+    defaults["window"] = int(_cfg_get("window", defaults["window"]))
+    defaults["num_epochs"] = int(_cfg_get("num_epochs", defaults["num_epochs"]))
+    viz_cfg = _cfg_get("viz_epochs", defaults["viz_epochs"])
+    if isinstance(viz_cfg, (list, tuple)):
+        defaults["viz_epochs"] = ",".join(str(int(v)) for v in viz_cfg)
+    else:
+        defaults["viz_epochs"] = str(viz_cfg)
+    return defaults
 
 
 def _rotvec_to_matrix(rotvec: np.ndarray) -> np.ndarray:
@@ -397,7 +432,7 @@ def _write_render_h5_run_demo_style(
     from tools import img_utils
 
     if not torch.cuda.is_available():
-        raise RuntimeError("run_demo-style prepare needs CUDA (nvdiffrast). Use --simple_render otherwise.")
+        raise RuntimeError("run_demo-style prepare needs CUDA (nvdiffrast).")
 
     seq_name = paths.seq_name
     video_prefix, cam_id = parse_exp_dir(exp_dir)
@@ -407,14 +442,12 @@ def _write_render_h5_run_demo_style(
     hy3d = osp.join(exp_dir, "object", "model.obj")
     if not osp.isfile(hy3d):
         raise FileNotFoundError(
-            f"run_demo-style finetune needs HY3D mesh at {hy3d} (same as run_demo.py). "
-            "Use --simple_render to skip."
+            f"run_demo-style finetune needs HY3D mesh at {hy3d} (same as run_demo.py)."
         )
     depth_mp4 = osp.join(exp_dir, "processed", "depth.mp4")
     if not osp.isfile(depth_mp4):
         raise FileNotFoundError(
-            f"run_demo-style finetune needs depth video {depth_mp4} (same as run_demo.py). "
-            "Use --simple_render to skip."
+            f"run_demo-style finetune needs depth video {depth_mp4} (same as run_demo.py)."
         )
 
     video_path = osp.join(exp_dir, "video.mp4")
@@ -624,32 +657,20 @@ def _write_render_h5(
     exp_dir: str,
     paths: PreparedPaths,
     fp_all_pkl: str,
-    intrinsics: np.ndarray,
     n_frames: int,
     input_size: int,
     *,
-    simple_render: bool,
     frame_start: int = 0,
 ) -> None:
-    if simple_render:
-        _write_render_h5_simple(
-            exp_dir, paths, fp_all_pkl, intrinsics, n_frames, input_size, frame_start=frame_start
-        )
-    else:
-        _write_render_h5_run_demo_style(
-            exp_dir, paths, fp_all_pkl, n_frames, input_size, frame_start=frame_start
-        )
+    _write_render_h5_run_demo_style(
+        exp_dir, paths, fp_all_pkl, n_frames, input_size, frame_start=frame_start
+    )
 
 
 def prepare_data(
     exp_dir: str,
-    human_gt_npz: str,
-    object_gt_npz: str,
-    max_frames: int | None,
     start_frame: int | None,
     end_frame: int | None,
-    input_size: int,
-    simple_render: bool,
     force_rebuild: bool = False,
 ) -> PreparedPaths:
     seq_name, _ = parse_exp_dir(exp_dir)
@@ -680,10 +701,10 @@ def prepare_data(
     human_mask_path = osp.join(exp_dir, "processed", "human_mask.mp4")
     object_mask_path = osp.join(exp_dir, "processed", "object_mask.mp4")
     depth_path = osp.join(exp_dir, "processed", "depth.mp4")
-    depth_for_count = None if simple_render else depth_path
     n_available = _min_frame_count(
-        video_path, human_mask_path, object_mask_path, None, depth_for_count
+        video_path, human_mask_path, object_mask_path, None, depth_path
     )
+    input_size = 224
     frame_start = 0 if start_frame is None else int(start_frame)
     if frame_start < 0:
         raise ValueError(f"start_frame must be >= 0, got {frame_start}")
@@ -694,17 +715,16 @@ def prepare_data(
             f"invalid frame range: start_frame={frame_start}, end_frame={frame_end}, available={n_available}"
         )
     n_frames = frame_end - frame_start + 1
-    if max_frames is not None:
-        n_frames = min(n_frames, int(max_frames))
-        frame_end = frame_start + n_frames - 1
     print(
         f"[prepare] sequence={seq_name}, frame range={frame_start}..{frame_end}, "
         f"frames={n_frames} (available={n_available})"
     )
 
-    # `human_gt_npz` / `object_gt_npz` here are treated as initialization inputs.
-    human_init_all = _load_human_gt(human_gt_npz, n_available)
-    obj_init_all = _load_object_gt(object_gt_npz, n_available)
+    # Initialization labels are read from default paths under exp_dir.
+    human_init_npz = osp.join(exp_dir, "human", "human_params_init.npz")
+    object_init_npz = osp.join(exp_dir, "object", "object_params_init.npz")
+    human_init_all = _load_human_gt(human_init_npz, n_available)
+    obj_init_all = _load_object_gt(object_init_npz, n_available)
     human_init = _slice_human_gt(human_init_all, frame_start, n_frames)
     obj_init = _slice_object_gt(obj_init_all, frame_start, n_frames)
     # Loss supervision must use GT labels.
@@ -725,10 +745,8 @@ def prepare_data(
         exp_dir=exp_dir,
         paths=paths,
         fp_all_pkl=osp.join(paths.fp_root, f"{seq_name}_all.pkl"),
-        intrinsics=human_init["intrinsics"],
         n_frames=n_frames,
         input_size=input_size,
-        simple_render=simple_render,
         frame_start=frame_start,
     )
     print(f"[prepare] render={osp.join(paths.render_root, f'{seq_name}_render.h5')}")
@@ -881,7 +899,7 @@ def run_finetune(
         f"clip_len={clip_len}",
         f"window={window}",
         "val_at_start=False",
-        "val_step_interval=1000000",
+        "val_epoch_interval=1",
         "ckpt_interval=1000000",
         "max_step_val=1",
         "debug=0",
@@ -893,11 +911,11 @@ def run_finetune(
     cmd = common_cmd + [
         f"ckpt_file={ckpt_for_train}",
         f"num_epochs={num_epochs}",
-        f"lr_scheduler.kwargs.num_training_steps={num_training_steps}",
     ]
     env = os.environ.copy()
     env["FINETUNE_LOG_FILE"] = train_log_file
     env["FINETUNE_CHUNK_TAG"] = f"full_epochs={num_epochs},ckpt={osp.basename(ckpt_for_train)}"
+    env["FINETUNE_FORCE_SCHED_STEPS"] = "1"
     viz_targets = sorted({ep for ep in viz_epochs if 1 <= ep <= num_epochs})
     if viz_targets:
         env["FINETUNE_EXP_DIR"] = exp_dir
@@ -1091,60 +1109,32 @@ def export_finetune_visualization(
 
 
 def main() -> None:
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config_pth", type=str, default="learning/configs/coconet-finetuning.yml")
+    pre_args, remaining = pre_parser.parse_known_args()
+    default_config_pth = osp.abspath(pre_args.config_pth)
+    cli_defaults = _load_cli_defaults_from_config(default_config_pth)
+
     parser = argparse.ArgumentParser(description="Prepare and launch CARI4D finetuning from base checkpoint.")
     parser.add_argument("--exp_dir", type=str, required=True)
-    parser.add_argument("--base_ckpt", type=str, default="data/base_checkpoints/base_coconet.pth")
-    parser.add_argument("--human_gt_npz", type=str, default=None)
-    parser.add_argument("--object_gt_npz", type=str, default=None)
-    parser.add_argument("--max_frames", type=int, default=None)
-    parser.add_argument("--start_frame", type=int, default=None)
-    parser.add_argument("--end_frame", type=int, default=None)
-    parser.add_argument("--input_size", type=int, default=224)
-    parser.add_argument("--clip_len", type=int, default=32)
-    parser.add_argument("--window", type=int, default=16)
-    parser.add_argument("--num_epochs", type=int, default=1)
-    parser.add_argument(
-        "--viz_epochs",
-        type=str,
-        default="1,8,16,32,64,128,256,384,512",
-        help="Comma-separated epochs (1-based, within this run) to export visualization at epoch end.",
-    )
-    parser.add_argument(
-        "--config_pth",
-        type=str,
-        default="learning/configs/coconet-finetuning.yml",
-        help="Hydra config path used for both trainer and run_horefine.",
-    )
-    parser.add_argument("--prepare_only", action="store_true")
-    parser.add_argument(
-        "--simple_render",
-        action="store_true",
-        help="Legacy render.h5: no depth video, no SMPL+obj live render (placeholder input xyz).",
-    )
-    parser.add_argument(
-        "--force_rebuild",
-        action="store_true",
-        help="Rebuild prepared data even if exp_dir/data already exists.",
-    )
-    args = parser.parse_args()
+    parser.add_argument("--start_frame", type=int, default=cli_defaults["start_frame"])
+    parser.add_argument("--end_frame", type=int, default=cli_defaults["end_frame"])
+    parser.add_argument("--force_rebuild", action="store_true", help="Rebuild prepared data even if exp_dir/data already exists.",)
+    args = parser.parse_args(remaining)
 
     exp_dir = osp.abspath(args.exp_dir)
-    base_ckpt = osp.abspath(args.base_ckpt)
-    config_pth = osp.abspath(args.config_pth)
-    if args.human_gt_npz:
-        human_gt_npz = osp.abspath(args.human_gt_npz)
-    else:
-        human_gt_npz = osp.join(exp_dir, "human", "human_params_init.npz")
-    if args.object_gt_npz:
-        object_gt_npz = osp.abspath(args.object_gt_npz)
-    else:
-        object_gt_npz = osp.join(exp_dir, "object", "object_params_init.npz")
+    base_ckpt = osp.abspath(str(cli_defaults["base_ckpt"]))
+    config_pth = default_config_pth
+    clip_len = int(cli_defaults["clip_len"])
+    window = int(cli_defaults["window"])
+    num_epochs = int(cli_defaults["num_epochs"])
+    viz_epochs_spec = str(cli_defaults["viz_epochs"])
 
     required = [
         base_ckpt,
         config_pth,
-        human_gt_npz,  # required init input
-        object_gt_npz,  # required init input
+        osp.join(exp_dir, "human", "human_params_init.npz"),  # required init input
+        osp.join(exp_dir, "object", "object_params_init.npz"),  # required init input
         osp.join(exp_dir, "human", "human_params_gt.npz"),  # required GT supervision
         osp.join(exp_dir, "object", "object_params_gt.npz"),  # required GT supervision
         osp.join(exp_dir, "video.mp4"),
@@ -1158,22 +1148,14 @@ def main() -> None:
 
     if (args.start_frame is not None or args.end_frame is not None) and not args.force_rebuild:
         print("[prepare] start_frame/end_frame is set; enabling force_rebuild=True to apply slicing.")
-    force_rebuild = args.force_rebuild or (args.num_epochs <= 0) or (args.start_frame is not None) or (args.end_frame is not None)
+    force_rebuild = args.force_rebuild or (num_epochs <= 0) or (args.start_frame is not None) or (args.end_frame is not None)
     paths = prepare_data(
         exp_dir=exp_dir,
-        human_gt_npz=human_gt_npz,
-        object_gt_npz=object_gt_npz,
-        max_frames=args.max_frames,
         start_frame=args.start_frame,
         end_frame=args.end_frame,
-        input_size=args.input_size,
-        simple_render=args.simple_render,
         force_rebuild=force_rebuild,
     )
-    if args.prepare_only:
-        print("[done] prepare_only=True, skipping trainer launch.")
-        return
-    if args.num_epochs <= 0:
+    if num_epochs <= 0:
         print("[train] num_epochs<=0, skipping finetuning and exporting visualization from base checkpoint.")
         export_finetune_visualization(exp_dir=exp_dir, paths=paths, ckpt_file=base_ckpt, config_pth=config_pth)
         return
@@ -1181,14 +1163,14 @@ def main() -> None:
         exp_dir=exp_dir,
         base_ckpt=base_ckpt,
         paths=paths,
-        clip_len=args.clip_len,
-        window=args.window,
-        num_epochs=args.num_epochs,
+        clip_len=clip_len,
+        window=window,
+        num_epochs=num_epochs,
         config_pth=config_pth,
-        viz_epochs=_parse_epoch_list(args.viz_epochs),
+        viz_epochs=_parse_epoch_list(viz_epochs_spec),
     )
-    viz_targets = {ep for ep in _parse_epoch_list(args.viz_epochs) if 1 <= ep <= args.num_epochs}
-    if args.num_epochs not in viz_targets:
+    viz_targets = {ep for ep in _parse_epoch_list(viz_epochs_spec) if 1 <= ep <= num_epochs}
+    if num_epochs not in viz_targets:
         export_finetune_visualization(exp_dir=exp_dir, paths=paths, config_pth=config_pth)
 
 

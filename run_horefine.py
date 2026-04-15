@@ -16,6 +16,7 @@ import os.path as osp
 import joblib
 import numpy as np
 import torch
+import torch.nn.functional as F
 import cv2
 import imageio
 import time
@@ -23,7 +24,7 @@ from tqdm import tqdm
 import nvdiffrast.torch as dr
 from pytorch3d.renderer import look_at_view_transform
 from scipy.spatial.transform import Rotation as R
-from typing import Any
+from typing import Any, Optional
 
 import Utils
 from Utils import load_smpl_obj_uvmap
@@ -136,7 +137,16 @@ class HORefineRunner(BehaveFPNLFRenderer):
         self.run_1seq(args, cfg, evaluator, trainer, errors_all, [])
 
     @torch.no_grad()
-    def run_1seq(self, args, cfg, evaluator, trainer, errors_all, frames_all):
+    def run_1seq(
+        self,
+        args,
+        cfg,
+        evaluator,
+        trainer,
+        errors_all,
+        frames_all,
+        metric_batch: Optional[dict] = None,
+    ):
         device = 'cuda'
         video_prefix = osp.basename(args.video).split('.')[0]
         if video_prefix == "video":
@@ -247,6 +257,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
         self.side_view_z = None # to render side view
         # Stats for in-run comparison logging in trainer.
         loss_t_eval_vals = []
+        loss_r_eval_vals = []
+        loss_hum_r_vals = []
         gt_fps = []
         input_fps = []
         input_parts = []
@@ -505,6 +517,24 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 loss_t_eval_vals.append(
                     float((torch.abs(trans_delta_pred - trans_delta_gt).reshape(bs, ts, -1) * fm).mean().item())
                 )
+                loss_func_v = F.l1_loss if 'l1' in str(cfg.loss_type) else F.mse_loss
+                loss_r_eval_vals.append(
+                    float(
+                        (
+                            loss_func_v(rot, rot_delta_gt, reduction='none').reshape(bs, ts, -1) * fm
+                        ).mean().item() * float(getattr(cfg, "w_rot", 1.0))
+                    )
+                )
+                if ("hum_pose" in output) and ("delta_smpl_rot" in batch):
+                    gt_delta_r = batch["delta_smpl_rot"][:, :, :, :, :2].reshape(-1, 24 * 6)
+                    hum_pose = output["hum_pose"]
+                    loss_hum_r_vals.append(
+                        float(
+                            (
+                                loss_func_v(hum_pose, gt_delta_r, reduction='none').reshape(bs, ts, -1) * fm
+                            ).mean().item() * float(getattr(cfg, "w_hum_rot", 1.0))
+                        )
+                    )
                 if hasattr(trainer, "coconet_gt_fingerprint"):
                     gt_fps.append(trainer.coconet_gt_fingerprint(batch))
                 if hasattr(trainer, "coconet_model_input_fingerprint"):
@@ -687,13 +717,88 @@ class HORefineRunner(BehaveFPNLFRenderer):
         data_in = {k: torch.cat(v, 0) if k != 'frames' and len(v) > 0 else v for k, v in data_in.items()}
         torch.save({"gt": data_gt, "pr": data_pr, "in": data_in}, pth_file)
         print(f'result saved to {pth_file}')
-        loss_t_viz = (float(np.mean(loss_t_eval_vals)) if len(loss_t_eval_vals) > 0 else None)
+        # Loss/metrics from the exact prediction used right before visualization rendering.
+        loss_t_viz_render = (float(loss_t_eval_vals[-1]) if len(loss_t_eval_vals) > 0 else None)
+        loss_r_viz_render = (float(loss_r_eval_vals[-1]) if len(loss_r_eval_vals) > 0 else None)
+        loss_hum_r_viz_render = (float(loss_hum_r_vals[-1]) if len(loss_hum_r_vals) > 0 else None)
+
+        # Optional train-side reference recomputation on metric_batch (for debug/comparison only).
+        loss_t_viz_metric_batch = None
+        loss_r_viz_metric_batch = None
+        loss_hum_r_viz_metric_batch = None
+        metric_batch_gt_fps = []
+        metric_batch_input_fps = []
+        metric_batch_input_parts = []
+        if metric_batch is not None:
+            rot_ref, rot_delta_gt_ref, trans_delta_gt_ref, trans_delta_pred_ref, out_ref = trainer.forward_batch(
+                metric_batch, cfg, trainer.model, ret_dict=True, vis=False
+            )
+            fm_ref = metric_batch.get("frame_mask", None)
+            if fm_ref is None:
+                bs_ref, ts_ref = metric_batch["pose_perturbed"].shape[:2]
+                fm_ref = torch.ones(
+                    (bs_ref, ts_ref), device=trans_delta_pred_ref.device, dtype=trans_delta_pred_ref.dtype
+                )
+            fm_ref = fm_ref.unsqueeze(-1)
+            bs_ref, ts_ref = fm_ref.shape[:2]
+            if hasattr(trainer, "_compute_logged_t_loss_from_forward"):
+                loss_t_viz_metric_batch = float(
+                    trainer._compute_logged_t_loss_from_forward(
+                        metric_batch, cfg, trans_delta_gt_ref, trans_delta_pred_ref, out_ref
+                    ).item()
+                )
+            else:
+                loss_t_viz_metric_batch = float(
+                    (torch.abs(trans_delta_pred_ref - trans_delta_gt_ref).reshape(bs_ref, ts_ref, -1) * fm_ref)
+                    .mean()
+                    .item()
+                )
+            loss_func_ref = F.l1_loss if 'l1' in str(cfg.loss_type) else F.mse_loss
+            loss_r_viz_metric_batch = float(
+                (
+                    loss_func_ref(rot_ref, rot_delta_gt_ref, reduction='none').reshape(bs_ref, ts_ref, -1) * fm_ref
+                ).mean().item() * float(getattr(cfg, "w_rot", 1.0))
+            )
+            if ("hum_pose" in out_ref) and ("delta_smpl_rot" in metric_batch):
+                gt_delta_r_ref = metric_batch["delta_smpl_rot"][:, :, :, :, :2].reshape(-1, 24 * 6)
+                hum_pose_ref = out_ref["hum_pose"]
+                loss_hum_r_viz_metric_batch = float(
+                    (
+                        loss_func_ref(hum_pose_ref, gt_delta_r_ref, reduction='none').reshape(bs_ref, ts_ref, -1)
+                        * fm_ref
+                    ).mean().item() * float(getattr(cfg, "w_hum_rot", 1.0))
+                )
+            if hasattr(trainer, "coconet_gt_fingerprint"):
+                metric_batch_gt_fps = [trainer.coconet_gt_fingerprint(metric_batch)]
+            if hasattr(trainer, "coconet_model_input_fingerprint"):
+                metric_batch_input_fps = [trainer.coconet_model_input_fingerprint(metric_batch)]
+            if hasattr(trainer, "coconet_model_input_fingerprint_parts"):
+                metric_batch_input_parts = [trainer.coconet_model_input_fingerprint_parts(metric_batch)]
+
+        # Primary viz losses for trainer comparison:
+        # prefer metric_batch-recomputed values (same batch as train/eval_t_loss),
+        # fallback to render-path values when metric_batch is unavailable.
+        loss_t_viz = loss_t_viz_metric_batch if loss_t_viz_metric_batch is not None else loss_t_viz_render
+        loss_r_viz = loss_r_viz_metric_batch if loss_r_viz_metric_batch is not None else loss_r_viz_render
+        loss_hum_r_viz = (
+            loss_hum_r_viz_metric_batch if loss_hum_r_viz_metric_batch is not None else loss_hum_r_viz_render
+        )
         self.last_run_1seq_stats = {
             "loss_t_viz": loss_t_viz,
-            "viz_loss_t_eval": loss_t_viz,  # backward-compatible key
+            "loss_r_viz": loss_r_viz,
+            "loss_hum_r_viz": loss_hum_r_viz,
+            "loss_t_viz_render": loss_t_viz_render,
+            "loss_r_viz_render": loss_r_viz_render,
+            "loss_hum_r_viz_render": loss_hum_r_viz_render,
+            "loss_t_viz_metric_batch": loss_t_viz_metric_batch,
+            "loss_r_viz_metric_batch": loss_r_viz_metric_batch,
+            "loss_hum_r_viz_metric_batch": loss_hum_r_viz_metric_batch,
             "gt_fps": gt_fps,
             "input_fps": input_fps,
             "input_parts": input_parts,
+            "metric_batch_gt_fps": metric_batch_gt_fps,
+            "metric_batch_input_fps": metric_batch_input_fps,
+            "metric_batch_input_parts": metric_batch_input_parts,
         }
         return self.last_run_1seq_stats
 

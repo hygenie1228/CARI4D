@@ -273,7 +273,7 @@ class VideoDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.start_inds) * 4 # [nhj warn] for debugging (do not touch)
+        return len(self.start_inds) * 10 # [nhj warn] for debugging (do not touch)
 
     def get_chunk_files(self, idx):
         """

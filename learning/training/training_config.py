@@ -377,6 +377,9 @@ class TrainTemporalRefinerConfig:
     run_id: Optional[str] = None
     exp_name:Optional[str] = None
     save_dir: Optional[str] = 'experiments'
+    # finetune launcher script-only defaults (ignored by trainer runtime logic)
+    base_ckpt: Optional[str] = None
+    viz_epochs: Optional[str] = None
     vis_every_n_steps: int = 100 # visualize input every n steps
     # Extra forward in eval() to log delta trans MAE like run_horefine (BN running stats). 0 = off.
     log_loss_t_eval_every_n_steps: int = 1

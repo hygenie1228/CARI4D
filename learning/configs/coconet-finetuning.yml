@@ -1,12 +1,9 @@
-lr: 0.002 #0.0001
+lr: 0.001 #0.0001
 c_in: 6 # xyz + mask (3 channel, with full obj mask included)
 zfar: 'Infinity'
 debug: 2
 
-# Log train/loss_t_eval: extra forward in eval() per N steps (same delta MAE as run_horefine). 0 = disable.
-log_loss_t_eval_every_n_steps: 1
-
-symm_loss: false
+num_epochs: 256
 batch_size: 4
 num_workers: 4
 
@@ -36,6 +33,15 @@ w_contact: 0.0   # Contact prediction loss weight
 # w_contact: 0.0   # Contact prediction loss weight
 # w_diff_l2: 10.0  # Diffusion branch L2 loss weight (for diffusion training modes)
 # w_heatmap: 0.0   # Contact heatmap loss weight (if heatmap supervision is enabled)
+
+# finetune.py CLI defaults
+base_ckpt: data/base_checkpoints/base_coconet.pth
+clip_len: 32
+viz_epochs: "8,16,32,64,128,256,384,512"
+symm_loss: false
+# Log train/loss_t_eval: extra forward in eval() per N steps (same delta MAE as run_horefine). 0 = disable.
+log_loss_t_eval_every_n_steps: 1
+
 
 n_view: 1
 run_id: null
@@ -112,7 +118,7 @@ mask_encode_type: hum-obj-fullobj
 max_step_val: 10
 val_step_interval: 250
 ckpt_interval: 200
-num_epochs: 5000
+
 vis_every_n_steps: 250
 val_at_start: false
 
