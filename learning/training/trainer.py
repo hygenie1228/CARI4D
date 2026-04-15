@@ -14,6 +14,7 @@ import json
 import time
 import hashlib
 import shutil
+import tempfile
 from typing import Optional
 
 import cv2
@@ -437,15 +438,9 @@ class Trainer(object):
                         os.remove(dst)
                     os.symlink(osp.abspath(src), dst)
 
-                vis_dir = osp.join(exp_dir, f"vis_epoch{epoch_1based:03d}")
-                os.makedirs(vis_dir, exist_ok=True)
-                for root, _, files in os.walk(vis_dir):
-                    for fname in files:
-                        if fname.endswith(".pth") or fname.endswith(".mp4"):
-                            try:
-                                os.remove(osp.join(root, fname))
-                            except OSError:
-                                pass
+                # Use a temporary directory for per-epoch visualization artifacts so
+                # scripts/finetune.py does not leave exp_dir/vis_epoch* directories.
+                vis_dir = tempfile.mkdtemp(prefix=f"finetune_vis_epoch{epoch_1based:03d}_")
                 before_ts = time.time()
 
                 cfg_viz = OmegaConf.create(OmegaConf.to_container(cfg, resolve=False))
@@ -576,7 +571,10 @@ class Trainer(object):
                         os.remove(out_in)
                     shutil.copy2(latest_in, out_in)
                 print(f"[finetune-viz] run_horefine in-process export done (mesh_grid={mesh_ok})")
+                shutil.rmtree(vis_dir, ignore_errors=True)
             except Exception as e:
+                if "vis_dir" in locals():
+                    shutil.rmtree(vis_dir, ignore_errors=True)
                 raise RuntimeError(f"[finetune-viz] run_horefine in-process export failed: {e}") from e
         if not mesh_ok:
             raise RuntimeError(
@@ -741,15 +739,21 @@ class Trainer(object):
             # Log average loss for the epoch from the main process
             if accelerator.is_main_process:
                 avg_loss = total_loss / len(train_dataloader)
-                avg_loss_t = total_loss_t / len(train_dataloader)
-                last_loss_t_value = float(avg_loss_t)
                 accelerator.print(f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss: {avg_loss:.4f} ---")
                 if epoch_last_batch is not None:
-                    # Recompute on the final model state (post-optimizer updates), model.eval(),
-                    # using the exact batch that will be used by visualization.
+                    # Recompute on the final model state (post-optimizer updates), on the same
+                    # epoch-last batch, in both train/eval modes for apples-to-apples comparison.
                     was_training_epoch_end = model.training
-                    model.eval()
                     with torch.no_grad():
+                        model.train()
+                        _, _, trans_delta_gt_t, trans_delta_pred_t, out_dict_t = self.forward_batch(
+                            epoch_last_batch, cfg, model, vis=False, ret_dict=True
+                        )
+                        loss_t_train_post = self._compute_logged_t_loss_from_forward(
+                            epoch_last_batch, cfg, trans_delta_gt_t, trans_delta_pred_t, out_dict_t
+                        )
+
+                        model.eval()
                         _, _, trans_delta_gt_e, trans_delta_pred_e, out_dict_e = self.forward_batch(
                             epoch_last_batch, cfg, model, vis=False, ret_dict=True
                         )
@@ -758,7 +762,12 @@ class Trainer(object):
                         )
                         epoch_eval_ref = {"batch": epoch_last_batch}
                     model.train(was_training_epoch_end)
+                    last_loss_t_value = float(loss_t_train_post.item())
                     last_loss_t_eval_epoch_avg = float(loss_t_eval_post.item())
+                    accelerator.print(
+                        f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Loss_t_train (post-update, viz-batch): "
+                        f"{last_loss_t_value:.6f} ---"
+                    )
                     accelerator.print(
                         f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Loss_t_eval (post-update, viz-batch): "
                         f"{last_loss_t_eval_epoch_avg:.6f} ---"
