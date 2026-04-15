@@ -1,4 +1,4 @@
-lr: 0.001 #0.0001
+lr: 0.0001 #0.0001
 c_in: 6 # xyz + mask (3 channel, with full obj mask included)
 zfar: 'Infinity'
 debug: 2
@@ -37,10 +37,14 @@ w_contact: 0.0   # Contact prediction loss weight
 # finetune.py CLI defaults
 base_ckpt: data/base_checkpoints/base_coconet.pth
 clip_len: 32
-viz_epochs: "8,16,32,64,128,256,384,512"
+viz_epochs: "2,4,8,16,32,64,128,256,384,512"
 symm_loss: false
 # Log train/loss_t_eval: extra forward in eval() per N steps (same delta MAE as run_horefine). 0 = disable.
 log_loss_t_eval_every_n_steps: 1
+# Train settings
+freeze_bn_stats: true
+dropout: 0.0
+
 
 
 n_view: 1
@@ -58,9 +62,9 @@ pose_init_type: copy-first #random-keyframes
 feat_dim_6dpose: 1024
 feat_dim_mask: 16
 loss_abs_trans_rela: true
+t_loss_space: delta # absolute
 abspose_posi_encode: true
 bnorm_mask: true
-dropout: 0.05
 dropout_1st: 0 
 pred_head_attn: false 
 mixed_spatial_temporal: true
@@ -79,7 +83,6 @@ pred_head_dims:
   - 512
   - 256
   - 128
-
 save_dir: experiments
 loss_type: l1-absrot-delta-hum # predict both abs and delta
 optimizer: adam

@@ -49,6 +49,7 @@ from torch.utils.tensorboard import SummaryWriter
 class Trainer(object):
     def __init__(self, cfg:TrainTemporalRefinerConfig):
         self.cfg = cfg
+        self.freeze_bn_stats = bool(getattr(cfg, "freeze_bn_stats", False))
         self.exp_dir = osp.join(cfg.save_dir, cfg.exp_name)
         os.makedirs(self.exp_dir, exist_ok=True)
 
@@ -144,6 +145,8 @@ class Trainer(object):
         )
         self.accelerator = accelerator
         self.dataset_test = dataset_test
+        if self.freeze_bn_stats and accelerator.is_main_process:
+            print("[train] freeze_bn_stats=True: keep BatchNorm running stats fixed during train mode.")
 
         # For fresh finetune starts, align scheduler horizon with actual train iterations.
         # Keep resumed scheduler state untouched when loaded from checkpoint.
@@ -151,12 +154,18 @@ class Trainer(object):
             steps_per_epoch = max(1, len(self.train_dataloader))
             old_total = None
             requested_total = None
+            old_warmup = None
             if hasattr(cfg.lr_scheduler, "kwargs") and "num_training_steps" in cfg.lr_scheduler.kwargs:
                 try:
                     old_total = int(cfg.lr_scheduler.kwargs["num_training_steps"])
                     requested_total = old_total
                 except Exception:
                     old_total = None
+            if hasattr(cfg.lr_scheduler, "kwargs") and "num_warmup_steps" in cfg.lr_scheduler.kwargs:
+                try:
+                    old_warmup = int(cfg.lr_scheduler.kwargs["num_warmup_steps"])
+                except Exception:
+                    old_warmup = None
             force_sched_from_data = os.environ.get("FINETUNE_FORCE_SCHED_STEPS", "").strip().lower() in (
                 "1",
                 "true",
@@ -169,10 +178,14 @@ class Trainer(object):
             else:
                 total_steps = requested_total if (requested_total is not None and requested_total > 0) else max(1, steps_per_epoch * int(cfg.num_epochs))
             cfg.lr_scheduler.kwargs["num_training_steps"] = int(total_steps)
+            warmup_steps = max(1, int(total_steps) // 20)
+            cfg.lr_scheduler.kwargs["num_warmup_steps"] = int(warmup_steps)
             self.scheduler = get_scheduler(cfg, self.optimizer)
             print(
                 f"[scheduler] set num_training_steps={total_steps} "
-                f"(steps/epoch={steps_per_epoch}, num_epochs={cfg.num_epochs}, requested={requested_total}, old={old_total}, force_from_data={force_sched_from_data})"
+                f"num_warmup_steps={warmup_steps} "
+                f"(steps/epoch={steps_per_epoch}, num_epochs={cfg.num_epochs}, requested={requested_total}, "
+                f"old_total={old_total}, old_warmup={old_warmup}, force_from_data={force_sched_from_data})"
             )
 
         # init logging
@@ -205,6 +218,14 @@ class Trainer(object):
             self.smpl_male = get_smpl('male', True).cuda()
             self.smpl_female = get_smpl('female', True).cuda()
         self._coconet_input_history = []
+
+    def _set_model_mode(self, training: bool) -> None:
+        """Set train/eval mode, optionally freezing BN running stats in train mode."""
+        self.model.train(training)
+        if training and self.freeze_bn_stats:
+            for mod in self.model.modules():
+                if isinstance(mod, torch.nn.modules.batchnorm._BatchNorm):
+                    mod.eval()
 
     @staticmethod
     def _tensor_fingerprint(tensor: torch.Tensor, sample_size: int = 4096) -> str:
@@ -318,7 +339,6 @@ class Trainer(object):
             "loss_acc",
             "loss_r",      # object rotation loss
             "loss_t",      # object translation loss
-            "loss_t_eval", # same batch, model.eval(); matches viz delta MAE
             "lr",
             "loss_hum_r",
             "loss_hum_r_raw",
@@ -390,7 +410,6 @@ class Trainer(object):
         batch,
         epoch_1based: int,
         finetune_exp_dir: str,
-        metric_batch: Optional[dict] = None,
     ) -> tuple[Optional[float], Optional[float], Optional[float]]:
         """Write finetuning_input (simple box) and finetuning_output (HoRefine-style mesh grid when possible)."""
         if not self.accelerator.is_main_process:
@@ -399,7 +418,7 @@ class Trainer(object):
         cfg = self.cfg
         model = self.model
         was_training = model.training
-        viz_loss_t_eval = None
+        viz_loss_t_render = None
         viz_loss_r = None
         viz_loss_hum_r = None
         out_in = osp.join(finetune_exp_dir, f"finetuning_input_epoch{epoch_1based:03d}.mp4")
@@ -513,23 +532,23 @@ class Trainer(object):
                         self,
                         errors_all,
                         [],
-                        metric_batch=metric_batch,
                     )
                     if _stats is None:
                         _stats = getattr(runner, "last_run_1seq_stats", None)
                     if _stats is None:
                         raise RuntimeError("run_1seq did not return stats for viz comparison")
-                    viz_loss_t_eval = _stats.get(
-                        "loss_t_viz_metric_batch",
-                        _stats.get("loss_t_viz", _stats.get("viz_loss_t_eval", _stats.get("loss_t_viz_render", None))),
+                    viz_loss_t_render = _stats.get("loss_t_viz_render", None)
+                    viz_loss_t_render = _stats.get(
+                        "loss_t_viz_render",
+                        _stats.get("loss_t_viz", _stats.get("viz_loss_t_eval", None)),
                     )
                     viz_loss_r = _stats.get(
-                        "loss_r_viz_metric_batch",
-                        _stats.get("loss_r_viz", _stats.get("loss_r_viz_render", None)),
+                        "loss_r_viz_render",
+                        _stats.get("loss_r_viz", None),
                     )
                     viz_loss_hum_r = _stats.get(
-                        "loss_hum_r_viz_metric_batch",
-                        _stats.get("loss_hum_r_viz", _stats.get("loss_hum_r_viz_render", None)),
+                        "loss_hum_r_viz_render",
+                        _stats.get("loss_hum_r_viz", None),
                     )
                 if _default_tensor_type_before == "torch.FloatTensor":
                     torch.set_default_tensor_type(torch.FloatTensor)
@@ -538,7 +557,7 @@ class Trainer(object):
                 else:
                     # expected to be float tensors in this project; fall back to CPU float.
                     torch.set_default_tensor_type(torch.FloatTensor)
-                model.train(was_training2)
+                self._set_model_mode(was_training2)
 
                 latest_out = None
                 latest_out_mtime = -1.0
@@ -586,9 +605,9 @@ class Trainer(object):
                 f"[finetune-viz] run_horefine did not produce input video: {out_in}. "
                 "Fallback visualization is disabled by user request."
             )
-        model.train(was_training)
+        self._set_model_mode(was_training)
         print(f"[finetune-viz] wrote {out_in} and {out_out} (mesh_grid={mesh_ok})")
-        return viz_loss_t_eval, viz_loss_r, viz_loss_hum_r
+        return viz_loss_t_render, viz_loss_r, viz_loss_hum_r
 
     def train(self):
         cfg = self.cfg
@@ -599,71 +618,114 @@ class Trainer(object):
         finetune_chunk_tag = os.environ.get("FINETUNE_CHUNK_TAG", "").strip()
 
         def _append_finetune_train_log(
-            reason: str, loss_t_value: float, loss_t_eval_avg: Optional[float] = None
+            reason: str, loss_t_value: float
         ) -> None:
             if (not finetune_log_file) or (not accelerator.is_main_process):
                 return
             os.makedirs(osp.dirname(finetune_log_file), exist_ok=True)
             tag = f" tag={finetune_chunk_tag}" if finetune_chunk_tag else ""
-            lte = ""
-            if loss_t_eval_avg is not None:
-                lte = f" loss_t_eval_avg={loss_t_eval_avg:.8f}"
             line = (
                 f"train_end{tag} reason={reason} epoch={train_state.epoch} "
-                f"step={train_state.step} loss_t={loss_t_value:.8f}{lte}\n"
+                f"step={train_state.step} loss_t={loss_t_value:.8f}\n"
             )
             with open(finetune_log_file, "a", encoding="utf-8") as f:
                 f.write(line)
-            print(
-                f"[train] appended to {finetune_log_file}: {line.strip()} "
-                f"(loss_t=train-mode epoch avg of logged t-loss term; "
-                f"loss_t_eval_avg=mean of eval-forward logged t-loss when log_loss_t_eval_every_n_steps>0)"
-            )
+            print(f"[train] appended to {finetune_log_file}: {line.strip()}")
 
         def _append_finetune_viz_compare_log(
             epoch_1based: int,
             train_t_loss: Optional[float],
-            train_loss_t_eval_avg: Optional[float],
-            viz_loss_t_eval: Optional[float],
+            viz_loss_t_render: Optional[float] = None,
         ) -> None:
             if (not finetune_log_file) or (not accelerator.is_main_process):
                 return
             os.makedirs(osp.dirname(finetune_log_file), exist_ok=True)
             tag = f" tag={finetune_chunk_tag}" if finetune_chunk_tag else ""
-            train_t_part = "nan" if train_t_loss is None else f"{train_t_loss:.8f}"
-            train_part = "nan" if train_loss_t_eval_avg is None else f"{train_loss_t_eval_avg:.8f}"
-            viz_part = "nan" if viz_loss_t_eval is None else f"{viz_loss_t_eval:.8f}"
-            diff_part = "nan"
-            if (train_loss_t_eval_avg is not None) and (viz_loss_t_eval is not None):
-                diff_part = f"{(viz_loss_t_eval - train_loss_t_eval_avg):.8f}"
+            # Canonical logging uses render-path t-loss for consistency with visualization quality.
+            train_t_log = viz_loss_t_render if viz_loss_t_render is not None else train_t_loss
+            train_t_part = "nan" if train_t_log is None else f"{train_t_log:.8f}"
+            viz_render_part = "nan" if viz_loss_t_render is None else f"{viz_loss_t_render:.8f}"
             line = (
                 f"viz_compare{tag} epoch={epoch_1based} step={train_state.step} "
-                f"train_t_loss={train_t_part} eval_t_loss={train_part} vis_t_loss={viz_part} "
-                f"train_loss_t_eval_avg={train_part} viz_loss_t_eval={viz_part} diff={diff_part}\n"
+                f"train_t_loss={train_t_part} vis_t_loss={viz_render_part} "
+                f"viz_loss_t_render={viz_render_part}\n"
             )
             with open(finetune_log_file, "a", encoding="utf-8") as f:
                 f.write(line)
             print(f"[train] appended viz comparison to {finetune_log_file}: {line.strip()}")
 
+        def _append_finetune_prefinetune_log(
+            train_t_loss: Optional[float],
+            vis_t_loss: Optional[float],
+            vis_t_loss_render: Optional[float] = None,
+        ) -> None:
+            if (not finetune_log_file) or (not accelerator.is_main_process):
+                return
+            os.makedirs(osp.dirname(finetune_log_file), exist_ok=True)
+            tag = f" tag={finetune_chunk_tag}" if finetune_chunk_tag else ""
+            # Canonical logging uses render-path t-loss for consistency with visualization quality.
+            train_t_log = vis_t_loss_render if vis_t_loss_render is not None else train_t_loss
+            train_part = "nan" if train_t_log is None else f"{train_t_log:.8f}"
+            vis_render_part = "nan" if vis_t_loss_render is None else f"{vis_t_loss_render:.8f}"
+            line = (
+                f"pre_finetune{tag} epoch={train_state.epoch} step={train_state.step} "
+                f"train_t_loss={train_part} vis_t_loss={vis_render_part} "
+                f"viz_loss_t_render={vis_render_part} "
+                "\n"
+            )
+            with open(finetune_log_file, "a", encoding="utf-8") as f:
+                f.write(line)
+            print(f"[train] appended pre-finetune stats to {finetune_log_file}: {line.strip()}")
+
         # --- 5. The Training Loop ---
         train_state = self.train_state
+        pre_finetune_logged = False
         if cfg.val_at_start:
             print('Evaluation at the start of training.')
             self.eval_model(cfg, model, train_state, val_dataloader)
         accelerator.print(f"Starting training...")
         last_loss_t_value = 0.0
+        fixed_ref_batch = None
         for epoch in range(cfg.num_epochs):
-            model.train()
+            self._set_model_mode(True)
             total_loss = 0.0
             total_loss_t = 0.0
-            total_loss_t_eval = 0.0
-            n_loss_t_eval = 0
-            last_loss_t_eval_epoch_avg = None
             epoch_last_batch = None
-            epoch_eval_ref: Optional[dict] = None
 
             for step, batch in enumerate(train_dataloader):
                 epoch_last_batch = batch
+                if fixed_ref_batch is None:
+                    # Keep a fixed reference batch (first train batch) for apples-to-apples
+                    # pre-finetune vs post-finetune loss/viz comparisons.
+                    fixed_ref_batch = batch
+                if (not pre_finetune_logged) and epoch == 0 and step == 0:
+                    # Log baseline before any finetune optimizer update.
+                    pre_train_t, pre_viz_t = None, None
+                    pre_viz_t_render = None
+                    with torch.no_grad():
+                        self._set_model_mode(True)
+                        _, _, trans_delta_gt_t0, trans_delta_pred_t0, out_dict_t0 = self.forward_batch(
+                            batch, cfg, model, vis=False, ret_dict=True
+                        )
+                        pre_train_t = float(
+                            self._compute_logged_t_loss_from_forward(
+                                batch, cfg, trans_delta_gt_t0, trans_delta_pred_t0, out_dict_t0
+                            ).item()
+                        )
+                        self._set_model_mode(True)
+                    fe_dir_pref, _ = self._finetune_viz_schedule(cfg)
+                    if fe_dir_pref:
+                        pre_viz_t, _, _ = self._export_finetune_epoch_videos(
+                            fixed_ref_batch,
+                            0,
+                            fe_dir_pref,
+                        )
+                    _append_finetune_prefinetune_log(
+                        pre_train_t,
+                        pre_viz_t,
+                        pre_viz_t_render,
+                    )
+                    pre_finetune_logged = True
                 # No need for .to(device), accelerate handles it!
                 # Forward pass
                 loss, loss_r, loss_t, loss_acc, _loss_t_train_delta_masked = self.forward_step(
@@ -685,23 +747,6 @@ class Trainer(object):
                         },
                         train_state.step,
                     )
-
-                # Compute eval-path t-loss with the same definition used by train/viz comparisons.
-                if cfg.log_loss_t_eval_every_n_steps > 0 and train_state.step % cfg.log_loss_t_eval_every_n_steps == 0:
-                    model.eval()
-                    with torch.no_grad():
-                        _, _, trans_delta_gt_e, trans_delta_pred_e, out_dict_e = self.forward_batch(
-                            batch, cfg, model, vis=False, ret_dict=True
-                        )
-                        loss_t_eval = self._compute_logged_t_loss_from_forward(
-                            batch, cfg, trans_delta_gt_e, trans_delta_pred_e, out_dict_e
-                        )
-                    model.train()
-                    loss_t_eval_f = float(loss_t_eval.item())
-                    total_loss_t_eval += loss_t_eval_f
-                    n_loss_t_eval += 1
-                    if accelerator.is_main_process:
-                        self._log_metrics({"train/loss_t_eval": loss_t_eval_f}, train_state.step)
 
                 # Backward pass - accelerator handles the backward pass
                 accelerator.backward(loss)
@@ -726,13 +771,9 @@ class Trainer(object):
                     self.eval_model(cfg, model, train_state, val_dataloader)
                     if accelerator.is_main_process:
                         self.save_checkpoint(accelerator, cfg, model, optimizer, scheduler, train_state)
-                    lte_part = (
-                        (total_loss_t_eval / n_loss_t_eval) if n_loss_t_eval > 0 else None
-                    )
                     _append_finetune_train_log(
                         reason="lr_too_small",
                         loss_t_value=last_loss_t_value,
-                        loss_t_eval_avg=lte_part,
                     )
                     return
 
@@ -740,37 +781,25 @@ class Trainer(object):
             if accelerator.is_main_process:
                 avg_loss = total_loss / len(train_dataloader)
                 accelerator.print(f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss: {avg_loss:.4f} ---")
-                if epoch_last_batch is not None:
-                    # Recompute on the final model state (post-optimizer updates), on the same
-                    # epoch-last batch, in both train/eval modes for apples-to-apples comparison.
+                ref_batch = fixed_ref_batch if fixed_ref_batch is not None else epoch_last_batch
+                if ref_batch is not None:
+                    # Recompute on the final model state (post-optimizer updates), on a fixed
+                    # reference batch for apples-to-apples pre/post finetune comparison.
                     was_training_epoch_end = model.training
                     with torch.no_grad():
-                        model.train()
+                        self._set_model_mode(True)
                         _, _, trans_delta_gt_t, trans_delta_pred_t, out_dict_t = self.forward_batch(
-                            epoch_last_batch, cfg, model, vis=False, ret_dict=True
+                            ref_batch, cfg, model, vis=False, ret_dict=True
                         )
                         loss_t_train_post = self._compute_logged_t_loss_from_forward(
-                            epoch_last_batch, cfg, trans_delta_gt_t, trans_delta_pred_t, out_dict_t
+                            ref_batch, cfg, trans_delta_gt_t, trans_delta_pred_t, out_dict_t
                         )
 
-                        model.eval()
-                        _, _, trans_delta_gt_e, trans_delta_pred_e, out_dict_e = self.forward_batch(
-                            epoch_last_batch, cfg, model, vis=False, ret_dict=True
-                        )
-                        loss_t_eval_post = self._compute_logged_t_loss_from_forward(
-                            epoch_last_batch, cfg, trans_delta_gt_e, trans_delta_pred_e, out_dict_e
-                        )
-                        epoch_eval_ref = {"batch": epoch_last_batch}
-                    model.train(was_training_epoch_end)
+                    self._set_model_mode(was_training_epoch_end)
                     last_loss_t_value = float(loss_t_train_post.item())
-                    last_loss_t_eval_epoch_avg = float(loss_t_eval_post.item())
                     accelerator.print(
                         f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Loss_t_train (post-update, viz-batch): "
                         f"{last_loss_t_value:.6f} ---"
-                    )
-                    accelerator.print(
-                        f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Loss_t_eval (post-update, viz-batch): "
-                        f"{last_loss_t_eval_epoch_avg:.6f} ---"
                     )
             if ((epoch + 1) % int(getattr(cfg, "val_epoch_interval", 1)) == 0):
                 self.eval_model(cfg, model, train_state, val_dataloader)
@@ -782,22 +811,22 @@ class Trainer(object):
                 and fe_dir
                 and fe_epochs
                 and completed_1based in fe_epochs
-                and epoch_last_batch is not None
+                and (fixed_ref_batch is not None or epoch_last_batch is not None)
             ):
+                ref_batch = fixed_ref_batch if fixed_ref_batch is not None else epoch_last_batch
                 self.save_checkpoint(accelerator, cfg, model, optimizer, scheduler, train_state)
                 step_pth = osp.join(self.exp_dir, f"step{train_state.step:06d}.pth")
                 ep_pth = osp.join(self.exp_dir, f"epoch{completed_1based:03d}.pth")
                 if osp.isfile(step_pth):
                     shutil.copy2(step_pth, ep_pth)
                     print(f"[finetune-viz] saved {ep_pth}")
-                viz_loss_t_eval, viz_loss_r, viz_loss_hum_r = self._export_finetune_epoch_videos(
-                    epoch_last_batch,
+                viz_loss_t_render, viz_loss_r, viz_loss_hum_r = self._export_finetune_epoch_videos(
+                    ref_batch,
                     completed_1based,
                     fe_dir,
-                    metric_batch=None if epoch_eval_ref is None else epoch_eval_ref.get("batch"),
                 )
                 viz_metrics = {
-                    "viz/loss_t": viz_loss_t_eval if viz_loss_t_eval is not None else float("nan"),
+                    "viz/loss_t": viz_loss_t_render if viz_loss_t_render is not None else float("nan"),
                     "viz/loss_r": viz_loss_r if viz_loss_r is not None else float("nan"),
                     "viz/loss_hum_r": viz_loss_hum_r if viz_loss_hum_r is not None else float("nan"),
                 }
@@ -815,8 +844,7 @@ class Trainer(object):
                 _append_finetune_viz_compare_log(
                     epoch_1based=completed_1based,
                     train_t_loss=last_loss_t_value,
-                    train_loss_t_eval_avg=last_loss_t_eval_epoch_avg,
-                    viz_loss_t_eval=viz_loss_t_eval,
+                    viz_loss_t_render=viz_loss_t_render,
                 )
             train_state.epoch += 1
         if accelerator.is_main_process:
@@ -827,7 +855,6 @@ class Trainer(object):
         _append_finetune_train_log(
             reason="completed",
             loss_t_value=last_loss_t_value,
-            loss_t_eval_avg=last_loss_t_eval_epoch_avg,
         )
         accelerator.print("Training complete!")
 
@@ -899,33 +926,13 @@ class Trainer(object):
             self.tb_writer.add_scalar("val/loss_t", np.mean(loss_val_t), train_state.step)
             self.tb_writer.add_scalar("val/loss_acc", np.mean(loss_val_acc), train_state.step)
         print(f'--- Eval at step {train_state.step}, loss: {loss_val:.4f} lr: {self.optimizer.param_groups[0]["lr"]:.5f} ---')
-        model.train()
+        self._set_model_mode(True)
 
     def _compute_logged_t_loss_from_forward(self, batch, cfg, trans_delta_gt, trans_delta_pred, out_dict):
-        """Match train/loss_t definition so train/eval/viz comparisons are consistent."""
+        """Delta-translation L1/MSE mean in normalized space (run_horefine-style)."""
         frame_mask = batch["frame_mask"].unsqueeze(-1)
         bs, t = frame_mask.shape[:2]
         loss_type = str(cfg["loss_type"])
-
-        if loss_type in [
-            "l1-absrot-delta",
-            "l1-absrot-delta-hum",
-            "l2-absrot-delta-humabs",
-            "l1-absrot-delta-humabs",
-            "l2-absrot-delta-hum",
-        ]:
-            loss_func = F.l1_loss if "l1" in loss_type else F.mse_loss
-            if self.cfg.pred_uncertainty or self.cfg.symm_loss:
-                loss_t = loss_func(trans_delta_pred, trans_delta_gt, reduction="none").reshape(bs, t, -1)
-                return (loss_t * frame_mask).mean() * cfg["w_transl"]
-
-            B_in_cams_interm = self.abspose_from_relative(
-                batch, cfg, batch["pose_perturbed"], out_dict["rot"], out_dict["trans"]
-            )
-            pose_gt = batch["pose_gt"]
-            loss_t = loss_func(B_in_cams_interm[:, :, :3, 3], pose_gt[:, :, :3, 3], reduction="none").sum(dim=(-1))
-            return (loss_t[:, :, None] * frame_mask).mean() * cfg["w_transl"]
-
         if "l1" in loss_type:
             loss_t = torch.abs(trans_delta_pred - trans_delta_gt).reshape(bs, t, -1)
         else:
@@ -1076,12 +1083,20 @@ class Trainer(object):
                         B_in_cams_interm[:, :, :3, :3], pose_gt[:, :, :3, :3], reduction='none'
                     ).sum(dim=(-1, -2))
                     loss_r = (loss_r[:, :, None] * frame_mask).mean() * cfg['w_rot']
-                    loss_t = loss_func(B_in_cams_interm[:, :, :3, 3], pose_gt[:, :, :3, 3], reduction='none'
-                    ).sum(dim=(-1))
-                    loss_t = (loss_t[:, :, None] * frame_mask).mean() * cfg['w_transl']
 
-                    loss_t_log = loss_t 
-                    loss_r_log = loss_r 
+                    t_loss_space = str(getattr(self.cfg, "t_loss_space", "absolute")).strip().lower()
+                    if t_loss_space == "delta":
+                        loss_t = (loss_func(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs, t, -1) * frame_mask).mean() * cfg['w_transl']
+                    else:
+                        if t_loss_space not in ("absolute", ""):
+                            if self.accelerator.is_main_process and self.train_state.step == 0:
+                                print(f"[warn] unknown t_loss_space={t_loss_space}, fallback to absolute")
+                        loss_t = loss_func(B_in_cams_interm[:, :, :3, 3], pose_gt[:, :, :3, 3], reduction='none'
+                        ).sum(dim=(-1))
+                        loss_t = (loss_t[:, :, None] * frame_mask).mean() * cfg['w_transl']
+
+                    loss_t_log = loss_t
+                    loss_r_log = loss_r
 
                     # Original
                     # loss_t = (loss_func(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs, t, -1)*frame_mask).mean()* cfg['w_transl']

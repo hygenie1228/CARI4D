@@ -393,6 +393,7 @@ class TrainTemporalRefinerConfig:
     ckpt_interval: int = 1000 # save ckpt after this steps
     val_at_start: bool = True # do one evaluation at the start
     use_BN:bool = True
+    freeze_bn_stats: bool = False  # if True, keep BN running stats fixed during training mode
     BN_momentum: float = 0.1
     optimizer: str = "adam"
     weight_decay: float = 0.0
@@ -419,6 +420,10 @@ class TrainTemporalRefinerConfig:
     lw_acc: float = 0.0 # acceleration loss
     vis_interval: Optional[int] = 1000
     loss_abs_trans_rela: bool = False # when compute abs trans loss, use relative to first frame or not
+    # Object translation t-loss space for l1-absrot-delta* training:
+    # - "absolute": abs pose translation error (existing behavior)
+    # - "delta": normalized delta translation error (run_horefine-style)
+    t_loss_space: str = "absolute"
     train_stage: str = 'train'
     train_smpl_only: bool = False # do not train other branches, but just SMPL
     symm_loss: bool = False # compute loss with all symmetries
@@ -475,4 +480,3 @@ class TrainTemporalRefinerConfig:
 
     # Debug: after CoCONet forward, replace predicted object delta rot with GT (ablation only).
     debug_force_gt_obj_rot: bool = False
-
