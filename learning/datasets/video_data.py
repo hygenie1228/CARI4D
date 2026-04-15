@@ -273,7 +273,7 @@ class VideoDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.start_inds) * 16
+        return len(self.start_inds) * 4 # [nhj warn] for debugging (do not touch)
 
     def get_chunk_files(self, idx):
         """
@@ -299,8 +299,7 @@ class VideoDataset(Dataset):
             assert seq == seq_name, f'{file} seq name incompatible with {image_files[0]}'
 
     def __getitem__(self, idx):
-        # [nhj warn] for debugging
-        idx = 0
+        idx = 0 # [nhj warn] for debugging (do not touch)
 
         try:
             data_dict = self.get_item(idx)
@@ -355,8 +354,11 @@ class VideoDataset(Dataset):
         K_rois = []
         obj = seq_name.split('_')[2]
 
-        # human info
-        joints_body = [np.matmul(self.joints_body[i], w2c_k[:3, :3].T) + w2c_k[:3, 3] for i in range(idx, idx + L)]
+        # human info (index by global frame offset for this chunk, not dataloader idx)
+        si = int(self.start_inds[idx])
+        joints_body = [
+            np.matmul(self.joints_body[si + i], w2c_k[:3, :3].T) + w2c_k[:3, 3] for i in range(L)
+        ]
 
         # add human info
         pre_dict = {}

@@ -7,7 +7,9 @@ with minimal custom glue code:
 2) Write `render.h5` like `run_demo.py` → `run_horefine.py`: mask-based crop, `processed/depth.mp4` for input
    XYZ, SMPL+object nvdiffrast in the ROI. Requires `object/model.obj`, depth video, and CUDA.
    `--simple_render` keeps the old placeholder path (no depth / no live render).
-3) Launch trainer starting from a base checkpoint.
+3) Launch trainer starting from a base checkpoint. Scheduled epochs in `--viz_epochs` export
+   `finetuning_{input,output}_epochNNN.mp4` inside the trainer process (same train-dataloader batch),
+   via env `FINETUNE_EXP_DIR` / `FINETUNE_VIZ_EPOCHS` — no per-epoch `run_horefine.py` subprocess.
 """
 
 from __future__ import annotations
@@ -866,6 +868,7 @@ def run_finetune(
         f"packed_root={paths.packed_root}",
         f"nlf_root={paths.nlf_root}",
         f"fp_root={paths.fp_root}",
+        f"hy3d_meshes_root={osp.join(exp_dir, 'object', 'model.obj')}",
         "rgb_root=unused",
         f"save_dir={save_dir}",
         f"exp_name={exp_name}",
@@ -884,63 +887,30 @@ def run_finetune(
         "debug=0",
     ]
 
-    def _run_train_chunk(chunk_epochs: int, ckpt_file: str) -> None:
-        steps_per_epoch = _estimate_steps_per_epoch()
-        # Use full planned finetune horizon for scheduler, not per-viz chunk horizon.
-        num_training_steps = max(1, steps_per_epoch * num_epochs)
-        cmd = common_cmd + [
-            f"ckpt_file={ckpt_file}",
-            f"num_epochs={chunk_epochs}",
-            # Keep scheduler horizon aligned with full finetune run in step units.
-            f"lr_scheduler.kwargs.num_training_steps={num_training_steps}",
-        ]
-        print(
-            f"[train] scheduler num_training_steps={num_training_steps} "
-            f"(steps/epoch={steps_per_epoch}, total_epochs={num_epochs}, chunk_epochs={chunk_epochs})"
-        )
-        print("[train] running command:")
-        print(" ".join(cmd))
-        subprocess.run(cmd, check=True, cwd=ROOT)
-
+    steps_per_epoch = _estimate_steps_per_epoch()
+    num_training_steps = max(1, steps_per_epoch * num_epochs)
+    train_log_file = osp.join(save_dir, "vis", "log.txt")
+    cmd = common_cmd + [
+        f"ckpt_file={ckpt_for_train}",
+        f"num_epochs={num_epochs}",
+        f"lr_scheduler.kwargs.num_training_steps={num_training_steps}",
+    ]
+    env = os.environ.copy()
+    env["FINETUNE_LOG_FILE"] = train_log_file
+    env["FINETUNE_CHUNK_TAG"] = f"full_epochs={num_epochs},ckpt={osp.basename(ckpt_for_train)}"
     viz_targets = sorted({ep for ep in viz_epochs if 1 <= ep <= num_epochs})
-    trained_epochs = 0
-    current_ckpt = ckpt_for_train
-
-    if not viz_targets:
-        _run_train_chunk(num_epochs, current_ckpt)
-        return
-
-    for target_epoch in viz_targets:
-        chunk_epochs = target_epoch - trained_epochs
-        if chunk_epochs <= 0:
-            continue
-        _run_train_chunk(chunk_epochs, current_ckpt)
-        trained_epochs = target_epoch
-        # trainer keeps only the latest step*.pth in train_exp_dir.
-        step_ckpts = sorted(
-            [
-                osp.join(train_exp_dir, name)
-                for name in os.listdir(train_exp_dir)
-                if re.match(r"^step\d+\.pth$", name)
-            ]
-        )
-        if step_ckpts:
-            current_ckpt = step_ckpts[-1]
-        epoch_ckpt = osp.join(train_exp_dir, f"epoch{target_epoch:03d}.pth")
-        shutil.copy2(current_ckpt, epoch_ckpt)
-        print(f"[train] saved epoch checkpoint: {epoch_ckpt}")
-        print(f"[train] export visualization at epoch {target_epoch}")
-        export_finetune_visualization(
-            exp_dir=exp_dir,
-            paths=paths,
-            ckpt_file=current_ckpt,
-            config_pth=config_pth,
-            output_suffix=f"epoch{target_epoch:03d}",
-        )
-
-    remaining_epochs = num_epochs - trained_epochs
-    if remaining_epochs > 0:
-        _run_train_chunk(remaining_epochs, current_ckpt)
+    if viz_targets:
+        env["FINETUNE_EXP_DIR"] = exp_dir
+        env["FINETUNE_VIZ_EPOCHS"] = ",".join(str(e) for e in viz_targets)
+        env["FINETUNE_SEQ_NAME"] = paths.seq_name
+        env["FINETUNE_HY3D_MESH"] = osp.join(exp_dir, "object", "model.obj")
+    print(
+        f"[train] scheduler num_training_steps={num_training_steps} "
+        f"(steps/epoch={steps_per_epoch}, total_epochs={num_epochs})"
+    )
+    print("[train] running command:")
+    print(" ".join(cmd))
+    subprocess.run(cmd, check=True, cwd=ROOT, env=env)
 
 
 def export_finetune_visualization(
@@ -1037,38 +1007,38 @@ def export_finetune_visualization(
         save_dir_for_viz = ckpt_grandparent
         exp_name_for_viz = osp.basename(ckpt_parent)
 
-    cmd = [
-        sys.executable,
-        "run_horefine.py",
-        f"config={config_pth}",
-        f"split_file={paths.split_json}",
-        "use_sel_view=True",
-        "render_video=True",
-        "use_intermediate=True",
-        "data_name=test-only",
-        f"hy3d_meshes_root={hy3d_mesh}",
-        f"masks_root={human_mask_mp4},{object_mask_mp4}",
-        f"packed_root={paths.packed_root}",
-        f"fp_root={paths.fp_root}",
-        f"nlf_root={paths.nlf_root}",
-        f"video={color_mp4}",
-        f"cam_id={cam_id}",
-        f"outpath={vis_dir}",
-        f"video_out={vis_dir}",
-        f"ckpt_file={ckpt_file}",
-        f"save_dir={save_dir_for_viz}",
-        f"exp_name={exp_name_for_viz}",
-        "no_wandb=True",
-        "job=test-only",
-        "identifier=_finetune",
-    ]
-    print("[viz] running command:")
-    print(" ".join(cmd))
-    try:
-        subprocess.run(cmd, check=True, cwd=ROOT)
-    except subprocess.CalledProcessError as e:
-        print(f"[viz] warning: visualization export failed: {e}")
-        return
+    # cmd = [
+    #     sys.executable,
+    #     "run_horefine.py",
+    #     f"config={config_pth}",
+    #     f"split_file={paths.split_json}",
+    #     "use_sel_view=True",
+    #     "render_video=True",
+    #     "use_intermediate=True",
+    #     "data_name=test-only",
+    #     f"hy3d_meshes_root={hy3d_mesh}",
+    #     f"masks_root={human_mask_mp4},{object_mask_mp4}",
+    #     f"packed_root={paths.packed_root}",
+    #     f"fp_root={paths.fp_root}",
+    #     f"nlf_root={paths.nlf_root}",
+    #     f"video={color_mp4}",
+    #     f"cam_id={cam_id}",
+    #     f"outpath={vis_dir}",
+    #     f"video_out={vis_dir}",
+    #     f"ckpt_file={ckpt_file}",
+    #     f"save_dir={save_dir_for_viz}",
+    #     f"exp_name={exp_name_for_viz}",
+    #     "no_wandb=True",
+    #     "job=test-only",
+    #     "identifier=_finetune",
+    # ]
+    # print("[viz] running command:")
+    # print(" ".join(cmd))
+    # try:
+    #     subprocess.run(cmd, check=True, cwd=ROOT)
+    # except subprocess.CalledProcessError as e:
+    #     print(f"[viz] warning: visualization export failed: {e}")
+    #     return
 
     latest_pth = None
     latest_pth_mtime = -1.0
@@ -1136,7 +1106,7 @@ def main() -> None:
     parser.add_argument(
         "--viz_epochs",
         type=str,
-        default="8,16,32,64,128,256,384,512",
+        default="1,8,16,32,64,128,256,384,512",
         help="Comma-separated epochs (1-based, within this run) to export visualization at epoch end.",
     )
     parser.add_argument(

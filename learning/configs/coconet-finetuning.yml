@@ -1,23 +1,26 @@
-lr: 0.001 #0.0001
+lr: 0.002 #0.0001
 c_in: 6 # xyz + mask (3 channel, with full obj mask included)
 zfar: 'Infinity'
 debug: 2
+
+# Log train/loss_t_eval: extra forward in eval() per N steps (same delta MAE as run_horefine). 0 = disable.
+log_loss_t_eval_every_n_steps: 1
 
 symm_loss: false
 batch_size: 4
 num_workers: 4
 
 # loss weights for finetuning
-w_rot: 1.0       # Object delta rotation loss weight (rot vs delta-rot GT)
+w_rot: 0.0       # Object delta rotation loss weight (rot vs delta-rot GT)
 w_transl: 1.0    # Object delta translation loss weight (trans vs delta-trans GT)
 w_abs_rot: 0.0   # Object absolute rotation loss weight (rot_abs vs abs-rot GT)
-w_hum_rot: 1.0   # Human pose rotation loss weight
-w_hum_t: 1.0     # Human translation loss weight
-w_hum_j: 2.0     # Human joint position loss weight
-w_hum_b: 0.1     # Human shape (betas) loss weight
+w_hum_rot: 0.0   # Human pose rotation loss weight
+w_hum_t: 0.0     # Human translation loss weight
+w_hum_j: 0.0     # Human joint position loss weight
+w_hum_b: 0.0     # Human shape (betas) loss weight
 w_hum_velo: 0.0  # Human temporal velocity regularization weight
-w_obj_velo: 1.0  # Object temporal velocity regularization weight
-w_contact: 0.1   # Contact prediction loss weight
+w_obj_velo: 0.0  # Object temporal velocity regularization weight
+w_contact: 0.0   # Contact prediction loss weight
 
 # w_rot: 0.1       # Object delta rotation loss weight (rot vs delta-rot GT)
 # w_transl: 1.0    # Object delta translation loss weight (trans vs delta-trans GT)

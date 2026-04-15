@@ -10,8 +10,11 @@
 trainer
 """
 import sys, os
+import json
 import time
 import hashlib
+import shutil
+from typing import Optional
 
 import cv2
 import trimesh
@@ -207,6 +210,41 @@ class Trainer(object):
         arr = flat.numpy()
         return hashlib.sha1(arr.tobytes()).hexdigest()
 
+    @staticmethod
+    def coconet_input_fingerprint_dict(batch, frame_ids: Optional[list] = None) -> dict:
+        """JSON-serializable fingerprints for CoCONet inputs (train vs viz pipeline check)."""
+        out: dict = {}
+        keys = (
+            "input_rgbs",
+            "render_rgbs",
+            "input_xyz",
+            "render_xyz",
+            "pose_perturbed",
+            "poseA_norm",
+            "K_rois",
+            "delta_transl",
+            "delta_rot",
+            "mesh_diameter",
+            "trans_normalizer",
+        )
+        for k in keys:
+            if k not in batch:
+                continue
+            v = batch[k]
+            if torch.is_tensor(v):
+                out[k] = Trainer._tensor_fingerprint(v)
+            elif isinstance(v, np.ndarray):
+                out[k] = Trainer._tensor_fingerprint(torch.from_numpy(v.astype(np.float32)))
+        if frame_ids is not None:
+            out["frame_ids"] = [str(x) for x in frame_ids]
+        elif "image_files" in batch:
+            imgs = batch["image_files"]
+            if torch.is_tensor(imgs):
+                out["frame_ids"] = [str(x) for x in imgs.detach().cpu().numpy().tolist()]
+            else:
+                out["frame_ids"] = [str(x) for x in list(imgs)]
+        return out
+
     def _log_metrics(self, log_dict: dict, step: int) -> None:
         """Log to wandb (if enabled) and TensorBoard (scalars only)."""
         if self.accelerator.is_main_process and (not self.cfg.no_wandb):
@@ -218,6 +256,7 @@ class Trainer(object):
             "train/loss",       # total loss
             "train/loss_r",     # object rotation loss
             "train/loss_t",     # object translation loss
+            "train/loss_t_eval",  # same batch, model.eval(); matches viz delta MAE
             "train/lr",         # learning rate
             "train/loss_hum_r", # human pose loss
             "train/loss_hum_b", # human shape loss
@@ -249,26 +288,317 @@ class Trainer(object):
                 if tb_key.startswith("train/") or tb_key.startswith("val/"):
                     self.tb_writer.add_scalar(tb_key, scalar, step)
 
+    def _finetune_viz_schedule(self, cfg):
+        fe_dir = (getattr(cfg, "finetune_exp_dir", None) or "").strip()
+        if not fe_dir:
+            fe_dir = os.environ.get("FINETUNE_EXP_DIR", "").strip()
+        raw_env = os.environ.get("FINETUNE_VIZ_EPOCHS", "").strip()
+        if raw_env:
+            epochs = sorted({int(x.strip()) for x in raw_env.split(",") if x.strip()})
+        else:
+            ve = getattr(cfg, "finetune_viz_epochs", None)
+            if not ve:
+                epochs = []
+            else:
+                epochs = sorted({int(x) for x in list(ve)})
+        return fe_dir, epochs
+
+    def _export_finetune_epoch_videos(self, batch, epoch_1based: int, finetune_exp_dir: str) -> None:
+        """Write finetuning_input (simple box) and finetuning_output (HoRefine-style mesh grid when possible)."""
+        if not self.accelerator.is_main_process:
+            return
+        import imageio.v2 as imageio
+
+        cfg = self.cfg
+        model = self.model
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            B = batch["pose_perturbed"].shape[0]
+            rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = self.forward_batch(
+                batch, cfg, model, vis=False, ret_dict=True
+            )
+            _, _, _, rgbsB, _, _ = self.prepare_input_viz(batch, cfg)
+            poseA = batch["pose_perturbed"]
+            B_in_cams, B_in_cams_gt = self.compute_abspose(
+                B, batch, cfg, poseA, rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output
+            )
+            bid = 0
+            to_origin = batch["to_origin"][bid].cpu().numpy()
+            bbox = batch["obj_bbox_3d"][bid].cpu().numpy()
+            clip_len = rgbsB.shape[1]
+            frames_in, frames_out_simple = [], []
+            for i in range(clip_len):
+                K = batch["K_rois"][bid, i].cpu().numpy()
+                rgbb = rgbsB[bid, i].transpose(1, 2, 0)
+                center_pose_in = poseA[bid, i].cpu().numpy() @ np.linalg.inv(to_origin)
+                center_pose_pr = B_in_cams[bid, i].detach().cpu().numpy() @ np.linalg.inv(to_origin)
+                center_pose_gt = B_in_cams_gt[bid, i].cpu().numpy() @ np.linalg.inv(to_origin)
+                vin = rgbb.copy()
+                vin = Utils.draw_posed_3d_box(
+                    K, img=vin, ob_in_cam=center_pose_in, bbox=bbox, line_color=(255, 0, 0)
+                )
+                vin = Utils.draw_xyz_axis(
+                    vin, ob_in_cam=center_pose_in, scale=0.1, K=K, thickness=3, transparency=0, is_input_rgb=True
+                )
+                vout = rgbb.copy()
+                vout = Utils.draw_posed_3d_box(
+                    K, img=vout, ob_in_cam=center_pose_gt, bbox=bbox, line_color=(0, 255, 0)
+                )
+                vout = Utils.draw_xyz_axis(
+                    vout, ob_in_cam=center_pose_gt, scale=0.1, K=K, thickness=3, transparency=0, is_input_rgb=True
+                )
+                vout = Utils.draw_posed_3d_box(
+                    K, img=vout, ob_in_cam=center_pose_pr, bbox=bbox, line_color=(0, 255, 255)
+                )
+                vout = Utils.draw_xyz_axis(
+                    vout, ob_in_cam=center_pose_pr, scale=0.1, K=K, thickness=3, transparency=0, is_input_rgb=True
+                )
+                frames_in.append(vin)
+                frames_out_simple.append(vout)
+        model.train(was_training)
+        out_in = osp.join(finetune_exp_dir, f"finetuning_input_epoch{epoch_1based:03d}.mp4")
+        out_out = osp.join(finetune_exp_dir, f"finetuning_output_epoch{epoch_1based:03d}.mp4")
+
+        seq_name = os.environ.get("FINETUNE_SEQ_NAME", "").strip()
+        if not seq_name and batch.get("image_files") is not None:
+            try:
+                seq_name = str(batch["image_files"][bid][0]).split(os.sep)[0]
+            except Exception:
+                seq_name = ""
+        mesh_ok = False
+        if seq_name:
+            try:
+                from argparse import Namespace
+                from run_horefine import HORefineRunner
+                from tools.eval_base import ModelEvaluator
+                from omegaconf import OmegaConf
+
+                # Mirror scripts/finetune.py export_finetune_visualization command but run in-process.
+                exp_dir = osp.abspath(finetune_exp_dir)
+                cam_id = int(getattr(cfg, "cam_id", 0))
+                video_prefix = seq_name
+                videos_dir = osp.join(exp_dir, "videos")
+                os.makedirs(videos_dir, exist_ok=True)
+
+                human_mask_mp4 = osp.join(exp_dir, "processed", "human_mask.mp4")
+                object_mask_mp4 = osp.join(exp_dir, "processed", "object_mask.mp4")
+                depth_mp4 = osp.join(exp_dir, "processed", "depth.mp4")
+                video_mp4 = osp.join(exp_dir, "video.mp4")
+                color_mp4 = osp.join(videos_dir, f"{video_prefix}.{cam_id}.color.mp4")
+                depth_reg = osp.join(videos_dir, f"{video_prefix}.{cam_id}.depth-reg.mp4")
+                for src, dst in ((video_mp4, color_mp4), (depth_mp4, depth_reg)):
+                    if osp.lexists(dst):
+                        os.remove(dst)
+                    os.symlink(osp.abspath(src), dst)
+
+                vis_dir = osp.join(exp_dir, f"vis_epoch{epoch_1based:03d}")
+                os.makedirs(vis_dir, exist_ok=True)
+                for root, _, files in os.walk(vis_dir):
+                    for fname in files:
+                        if fname.endswith(".pth") or fname.endswith(".mp4"):
+                            try:
+                                os.remove(osp.join(root, fname))
+                            except OSError:
+                                pass
+                before_ts = time.time()
+
+                cfg_viz = OmegaConf.create(OmegaConf.to_container(cfg, resolve=False))
+                data_source = str(getattr(cfg, "data_source", "behave"))
+                wild_video = bool(getattr(cfg, "wild_video", False))
+                cfg_viz.split_file = getattr(cfg, "split_file", None)
+                cfg_viz.use_sel_view = True
+                cfg_viz.render_video = True
+                cfg_viz.use_intermediate = True
+                cfg_viz.data_name = "test-only"
+                cfg_viz.hy3d_meshes_root = (
+                    (os.environ.get("FINETUNE_HY3D_MESH", "") or "").strip() or getattr(cfg, "hy3d_meshes_root", "")
+                )
+                cfg_viz.masks_root = f"{osp.abspath(human_mask_mp4)},{osp.abspath(object_mask_mp4)}"
+                cfg_viz.packed_root = getattr(cfg, "packed_root", None)
+                cfg_viz.fp_root = getattr(cfg, "fp_root", None)
+                cfg_viz.nlf_root = getattr(cfg, "nlf_root", None)
+                cfg_viz.video = color_mp4
+                cfg_viz.cam_id = cam_id
+                cfg_viz.outpath = vis_dir
+                cfg_viz.video_out = vis_dir
+                cfg_viz.no_wandb = True
+                cfg_viz.job = "test-only"
+                cfg_viz.identifier = "_finetune"
+
+                args = Namespace(
+                    video=cfg_viz.video,
+                    outpath=cfg_viz.outpath,
+                    fps=30,
+                    tstart=3.0,
+                    tend=None,
+                    redo=False,
+                    kid=1,
+                    start=0,
+                    end=None,
+                    nodepth=False,
+                    packed_path="data/behave/behave-packed/",
+                    dataset_path="data/behave/",
+                    output_dir="outputs/foundpose_train/behave",
+                    h5_path="data/behave_release/30fps-h5",
+                    shard_num=5,
+                    trans_normalizer=[0.02, 0.02, 0.05],
+                    rot_normalizer=20.0,
+                    rend_size=224,
+                    skip=1,
+                    add_rgb=False,
+                    data_source=data_source,
+                )
+                args.wild_video = wild_video
+                args.cam_id = cfg_viz.cam_id
+
+                evaluator = ModelEvaluator(cfg_viz)
+                err_keys = ["rot", "transl", "mpjpe", "v2v", "mpjae", "smpl_t"]
+                errors_all = {k: [] for k in err_keys}
+                runner = HORefineRunner(args)
+                runner.cfg = cfg_viz
+
+                was_training2 = model.training
+                # run_horefine.run_1seq sets global default tensor type to cuda float tensor.
+                # Restore it after export; otherwise next DataLoader worker fork can crash with
+                # "Cannot re-initialize CUDA in forked subprocess".
+                _default_tensor_type_before = torch.tensor(0.0).type()
+                model.eval()
+                with torch.no_grad():
+                    runner.run_1seq(args, cfg_viz, evaluator, self, errors_all, [])
+                if _default_tensor_type_before == "torch.FloatTensor":
+                    torch.set_default_tensor_type(torch.FloatTensor)
+                elif _default_tensor_type_before == "torch.cuda.FloatTensor":
+                    torch.set_default_tensor_type(torch.cuda.FloatTensor)
+                else:
+                    # expected to be float tensors in this project; fall back to CPU float.
+                    torch.set_default_tensor_type(torch.FloatTensor)
+                model.train(was_training2)
+
+                latest_out = None
+                latest_out_mtime = -1.0
+                latest_in = None
+                latest_in_mtime = -1.0
+                for root, _, files in os.walk(vis_dir):
+                    for fname in files:
+                        if not fname.endswith(".mp4"):
+                            continue
+                        src_mp4 = osp.join(root, fname)
+                        mtime = osp.getmtime(src_mp4)
+                        if mtime < before_ts:
+                            continue
+                        if "_input.mp4" in fname:
+                            if mtime > latest_in_mtime:
+                                latest_in_mtime = mtime
+                                latest_in = src_mp4
+                        else:
+                            if mtime > latest_out_mtime:
+                                latest_out_mtime = mtime
+                                latest_out = src_mp4
+
+                if latest_out is not None:
+                    if osp.exists(out_out):
+                        os.remove(out_out)
+                    shutil.copy2(latest_out, out_out)
+                    mesh_ok = True
+                if latest_in is not None:
+                    if osp.exists(out_in):
+                        os.remove(out_in)
+                    shutil.copy2(latest_in, out_in)
+                print(f"[finetune-viz] run_horefine in-process export done (mesh_grid={mesh_ok})")
+            except Exception as e:
+                raise RuntimeError(f"[finetune-viz] run_horefine in-process export failed: {e}") from e
+        if not mesh_ok:
+            raise RuntimeError(
+                "[finetune-viz] run_horefine visualization was not produced (mesh_grid=False). "
+                "Fallback visualization is disabled by user request."
+            )
+        if not osp.exists(out_in):
+            raise RuntimeError(
+                f"[finetune-viz] run_horefine did not produce input video: {out_in}. "
+                "Fallback visualization is disabled by user request."
+            )
+        print(f"[finetune-viz] wrote {out_in} and {out_out} (mesh_grid={mesh_ok})")
 
     def train(self):
         cfg = self.cfg
         accelerator = self.accelerator
         model, optimizer, train_dataloader, val_dataloader = self.model, self.optimizer, self.train_dataloader, self.val_dataloader
         scheduler = self.scheduler
+        finetune_log_file = os.environ.get("FINETUNE_LOG_FILE", "").strip()
+        finetune_chunk_tag = os.environ.get("FINETUNE_CHUNK_TAG", "").strip()
+        last_finetune_batch = None
+
+        def _append_finetune_train_log(
+            reason: str, loss_t_value: float, loss_t_eval_avg: Optional[float] = None
+        ) -> None:
+            if (not finetune_log_file) or (not accelerator.is_main_process):
+                return
+            os.makedirs(osp.dirname(finetune_log_file), exist_ok=True)
+            tag = f" tag={finetune_chunk_tag}" if finetune_chunk_tag else ""
+            lte = ""
+            if loss_t_eval_avg is not None:
+                lte = f" loss_t_eval_avg={loss_t_eval_avg:.8f}"
+            line = (
+                f"train_end{tag} reason={reason} epoch={train_state.epoch} "
+                f"step={train_state.step} loss_t={loss_t_value:.8f}{lte}\n"
+            )
+            with open(finetune_log_file, "a", encoding="utf-8") as f:
+                f.write(line)
+            print(
+                f"[train] appended to {finetune_log_file}: {line.strip()} "
+                f"(loss_t=train-mode epoch avg of logged delta term; "
+                f"loss_t_eval_avg=mean of eval-forward delta MAE when log_loss_t_eval_every_n_steps>0)"
+            )
+
+        def _write_finetune_input_fingerprint(batch_obj, which: str) -> bool:
+            if (not finetune_log_file) or (not accelerator.is_main_process) or batch_obj is None:
+                return False
+            name = "train_last_batch_input_fp.json" if which == "last" else "train_first_batch_input_fp.json"
+            fp_path = osp.join(osp.dirname(finetune_log_file), name)
+            try:
+                fp_dict = Trainer.coconet_input_fingerprint_dict(batch_obj)
+                with open(fp_path, "w", encoding="utf-8") as f:
+                    json.dump(fp_dict, f, indent=2)
+                print(f"[train] wrote input fingerprint ({which}) -> {fp_path}")
+                return True
+            except Exception as e:
+                print(f"[train] warning: could not write input fingerprint ({which}): {e}")
+                return False
+
         # --- 5. The Training Loop ---
         train_state = self.train_state
         if cfg.val_at_start:
             print('Evaluation at the start of training.')
             self.eval_model(cfg, model, train_state, val_dataloader)
         accelerator.print(f"Starting training...")
+        last_loss_t_value = 0.0
+        wrote_first_batch_fp = False
+        first_batch_for_fp = None  # first dataloader batch of chunk (for fingerprint retry)
         for epoch in range(cfg.num_epochs):
             model.train()
             total_loss = 0.0
+            total_loss_t = 0.0
+            total_loss_t_eval = 0.0
+            n_loss_t_eval = 0
+            last_loss_t_eval_epoch_avg = None
+            epoch_last_batch = None
 
             for step, batch in enumerate(train_dataloader):
+                epoch_last_batch = batch
+                if finetune_log_file:
+                    last_finetune_batch = batch
+                    if first_batch_for_fp is None:
+                        first_batch_for_fp = batch
+                    if (not wrote_first_batch_fp) and epoch == 0 and step == 0:
+                        if _write_finetune_input_fingerprint(batch, "first"):
+                            wrote_first_batch_fp = True
                 # No need for .to(device), accelerate handles it!
                 # Forward pass
-                loss, loss_r, loss_t, loss_acc = self.forward_step(batch, cfg, model, vis=step%cfg.vis_every_n_steps==0)
+                loss, loss_r, loss_t, loss_acc, loss_t_train_delta_masked = self.forward_step(
+                    batch, cfg, model, vis=step % cfg.vis_every_n_steps == 0
+                )
+                last_loss_t_value = float(loss_t.item())
                 if not cfg.no_wandb and accelerator.is_main_process:
                     log_dict = {"loss_train": loss.item(), 'loss_train_r': loss_r.item(),
                                 'loss_train_t': loss_t.item(), 'lr': optimizer.param_groups[0]["lr"]}
@@ -285,6 +615,28 @@ class Trainer(object):
                         train_state.step,
                     )
 
+                # Delta trans MAE: prefer same train-forward as loss_t (avoids train vs eval BN/dropout mismatch).
+                if cfg.log_loss_t_eval_every_n_steps > 0 and train_state.step % cfg.log_loss_t_eval_every_n_steps == 0:
+                    if loss_t_train_delta_masked is not None:
+                        loss_t_eval_f = float(loss_t_train_delta_masked.detach().item())
+                    else:
+                        model.eval()
+                        with torch.no_grad():
+                            _, _, trans_delta_gt_e, trans_delta_pred_e, _ = self.forward_batch(
+                                batch, cfg, model, vis=False, ret_dict=True
+                            )
+                            fm = batch["frame_mask"].unsqueeze(-1)
+                            bs, ts = fm.shape[:2]
+                            loss_t_eval = (
+                                torch.abs(trans_delta_pred_e - trans_delta_gt_e).reshape(bs, ts, -1) * fm
+                            ).mean()
+                        model.train()
+                        loss_t_eval_f = float(loss_t_eval.item())
+                    total_loss_t_eval += loss_t_eval_f
+                    n_loss_t_eval += 1
+                    if accelerator.is_main_process:
+                        self._log_metrics({"train/loss_t_eval": loss_t_eval_f}, train_state.step)
+
                 # Backward pass - accelerator handles the backward pass
                 accelerator.backward(loss)
                 optimizer.step()
@@ -292,6 +644,7 @@ class Trainer(object):
                 scheduler.step()
 
                 total_loss += loss.item()
+                total_loss_t += loss_t.item()
                 train_state.step += 1
 
                 # Print progress from the main process only
@@ -309,18 +662,66 @@ class Trainer(object):
                     self.eval_model(cfg, model, train_state, val_dataloader)
                     if accelerator.is_main_process:
                         self.save_checkpoint(accelerator, cfg, model, optimizer, scheduler, train_state)
+                    _write_finetune_input_fingerprint(last_finetune_batch, "last")
+                    lte_part = (
+                        (total_loss_t_eval / n_loss_t_eval) if n_loss_t_eval > 0 else None
+                    )
+                    _append_finetune_train_log(
+                        reason="lr_too_small",
+                        loss_t_value=last_loss_t_value,
+                        loss_t_eval_avg=lte_part,
+                    )
                     return
 
             # Log average loss for the epoch from the main process
             if accelerator.is_main_process:
                 avg_loss = total_loss / len(train_dataloader)
+                avg_loss_t = total_loss_t / len(train_dataloader)
+                last_loss_t_value = float(avg_loss_t)
                 accelerator.print(f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss: {avg_loss:.4f} ---")
+                accelerator.print(f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss_t: {avg_loss_t:.4f} ---")
+                if n_loss_t_eval > 0:
+                    avg_te = total_loss_t_eval / n_loss_t_eval
+                    last_loss_t_eval_epoch_avg = float(avg_te)
+                    accelerator.print(
+                        f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss_t_eval (viz-match): {avg_te:.6f} ---"
+                    )
+                if (
+                    finetune_log_file
+                    and (not wrote_first_batch_fp)
+                    and epoch == 0
+                    and first_batch_for_fp is not None
+                ):
+                    if _write_finetune_input_fingerprint(first_batch_for_fp, "first"):
+                        wrote_first_batch_fp = True
+            fe_dir, fe_epochs = self._finetune_viz_schedule(cfg)
+            completed_1based = epoch + 1
+            if (
+                accelerator.is_main_process
+                and fe_dir
+                and fe_epochs
+                and completed_1based in fe_epochs
+                and epoch_last_batch is not None
+            ):
+                self.save_checkpoint(accelerator, cfg, model, optimizer, scheduler, train_state)
+                step_pth = osp.join(self.exp_dir, f"step{train_state.step:06d}.pth")
+                ep_pth = osp.join(self.exp_dir, f"epoch{completed_1based:03d}.pth")
+                if osp.isfile(step_pth):
+                    shutil.copy2(step_pth, ep_pth)
+                    print(f"[finetune-viz] saved {ep_pth}")
+                self._export_finetune_epoch_videos(epoch_last_batch, completed_1based, fe_dir)
             train_state.epoch += 1
         if accelerator.is_main_process:
             self.save_checkpoint(accelerator, cfg, model, optimizer, scheduler, train_state)
             if self.tb_writer is not None:
                 self.tb_writer.flush()
                 self.tb_writer.close()
+        _write_finetune_input_fingerprint(last_finetune_batch, "last")
+        _append_finetune_train_log(
+            reason="completed",
+            loss_t_value=last_loss_t_value,
+            loss_t_eval_avg=last_loss_t_eval_epoch_avg,
+        )
         accelerator.print("Training complete!")
 
     def save_checkpoint(self, accelerator, cfg, model, optimizer, scheduler, train_state):
@@ -356,7 +757,7 @@ class Trainer(object):
             if step_val >= cfg.max_step_val:
                 break
             with torch.no_grad():
-                loss, loss_r, loss_t, loss_acc = self.forward_step(batch, cfg, model, vis=step_val==0)
+                loss, loss_r, loss_t, loss_acc, _ = self.forward_step(batch, cfg, model, vis=step_val == 0)
             loss_val.append(loss.item())
             loss_val_r.append(loss_r.item())
             loss_val_t.append(loss_t.item())
@@ -398,6 +799,7 @@ class Trainer(object):
         # pre-trained model: A is the rendered, B is the input
         rot_delta_pred, rot_delta_gt, trans_delta_gt, trans_delta_pred, out_dict = self.forward_batch(batch, cfg, model, vis, ret_dict=True)
         loss_acc = torch.tensor(0, device=rot_delta_gt.device)
+        loss_t_train_delta_masked = None  # masked delta-t from this forward (train mode); see return
         if cfg['loss_type'] == 'l1':
             loss_t = torch.abs(trans_delta_pred - trans_delta_gt).mean()
             loss_r = torch.abs(rot_delta_pred - rot_delta_gt).mean() * cfg['w_rot']
@@ -772,7 +1174,24 @@ class Trainer(object):
                 loss_r = loss_r_log
             if loss_t_log is not None:
                 loss_t = loss_t_log
-        return loss, loss_r, loss_t, loss_acc
+
+        # Same forward as loss_t (train mode): masked delta t metric — avoids a second forward in eval().
+        if cfg['loss_type'] in ['l1-absrot-delta', 'l1-absrot-delta-hum', 'l2-absrot-delta-humabs', 'l1-absrot-delta-humabs', 'l2-absrot-delta-hum']:
+            frame_mask_td = batch['frame_mask'].unsqueeze(-1)
+            bs_td, t_td = frame_mask_td.shape[:2]
+            loss_func_td = F.l1_loss if 'l1' in cfg['loss_type'] else F.mse_loss
+            loss_t_train_delta_masked = (
+                loss_func_td(trans_delta_pred, trans_delta_gt, reduction='none').reshape(bs_td, t_td, -1)
+                * frame_mask_td
+            ).mean() * cfg['w_transl']
+        elif cfg['loss_type'] in ['l1', 'l1+self-acc']:
+            frame_mask_td = batch['frame_mask'].unsqueeze(-1)
+            bs_td, t_td = frame_mask_td.shape[:2]
+            loss_t_train_delta_masked = (
+                torch.abs(trans_delta_pred - trans_delta_gt).reshape(bs_td, t_td, -1) * frame_mask_td
+            ).mean()
+
+        return loss, loss_r, loss_t, loss_acc, loss_t_train_delta_masked
 
     def forward_batch(self, batch, cfg, model, vis=False, ret_dict=False):
         "forward one batch"
@@ -820,7 +1239,7 @@ class Trainer(object):
         # WARNING: Debug-only ablation.
         # This replaces model-predicted object delta rotation with GT immediately after CoCONet output.
         # Keep disabled in normal training/eval (`debug_force_gt_obj_rot=False`).
-        if True: # getattr(cfg, "debug_force_gt_obj_rot", False):
+        if getattr(cfg, "debug_force_gt_obj_rot", False):
             with torch.no_grad():
                 pred_rot_mae = torch.abs(output['rot'].float() - rot_delta_gt).mean()
                 pred_trans_mae = torch.abs(output['trans'].float() - trans_delta_gt.reshape(B * T, 3)).mean()
@@ -833,7 +1252,6 @@ class Trainer(object):
                 self.train_state.step,
             )
             output['rot'] = rot_delta_gt.detach().clone()
-            # output['trans'] = trans_delta_gt.reshape(B * T, 3).detach().clone()
 
         trans = output['trans'].float()  # (BT,3)
         rot = output['rot'].float()  # BT, 3

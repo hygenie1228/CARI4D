@@ -716,6 +716,221 @@ class HORefineRunner(BehaveFPNLFRenderer):
         rend_batch_side = (rend_batch_side * 255).byte().cpu().numpy()
         return mtx_front, rend_batch, rend_batch_side, view_mat
 
+    def render_front_side_Ks(self, H, W, Ks, glctx, mesh_tensors, verts_comb_pr):
+        "Like render_front_side but Ks is (T,3,3) intrinsics per frame (training ROI crops can differ per t)."
+        device = verts_comb_pr.device
+        T = len(verts_comb_pr)
+        mats = [
+            Utils.projection_matrix_from_intrinsics(Ks[j], height=H, width=W, znear=0.001, zfar=100).reshape(4, 4)
+            for j in range(T)
+        ]
+        projection_mat = torch.as_tensor(np.stack(mats, axis=0), device=device, dtype=torch.float)
+        ob_in_glcams = torch.tensor(Utils.glcam_in_cvcam, device=device, dtype=torch.float).reshape(1, 4, 4)
+        mtx_front = projection_mat @ ob_in_glcams
+        pos_homo = Utils.to_homo_torch(verts_comb_pr)
+        pos_clip = (mtx_front[:, None] @ pos_homo[..., None])[..., 0]
+        rend_batch = Utils.nvdiff_rasterize(glctx, mesh_tensors, pos_clip, (H, W))
+        rend_batch = (rend_batch * 255).byte().cpu().numpy()
+        if self.side_view_z is None:
+            self.side_view_z = torch.mean(verts_comb_pr[:, :, 2])
+        z_now = torch.mean(verts_comb_pr[:, :, 2])
+        if abs(z_now - self.side_view_z) > 1.0:
+            self.side_view_z = z_now
+        z = self.side_view_z
+        at = torch.tensor([[0.0, 0.0, z]], device=device, dtype=torch.float)
+        Rv, Tv = look_at_view_transform(dist=z * 1.3, elev=0, azim=75, at=at, up=((0, 1, 0),), device=device)
+        view_mat = torch.eye(4, device=device, dtype=torch.float)
+        view_mat[:3, :3] = Rv[0]
+        view_mat[:3, 3] = Tv[0]
+        verts_pr_side = torch.matmul(verts_comb_pr, view_mat[:3, :3]) + view_mat[:3, 3]
+        pos_homo_side = Utils.to_homo_torch(verts_pr_side)
+        pos_clip_side = (mtx_front[:, None] @ pos_homo_side[..., None])[..., 0]
+        rend_batch_side = Utils.nvdiff_rasterize(glctx, mesh_tensors, pos_clip_side, (H, W))
+        rend_batch_side = (rend_batch_side * 255).byte().cpu().numpy()
+        return mtx_front, rend_batch, rend_batch_side, view_mat
+
+
+def _mesh_tensors_to_device(mesh_tensors: dict, device: torch.device) -> dict:
+    "load_smpl_obj_uvmap returns CPU/cuda tensors; align with trainer device."
+    out = {}
+    for k, v in mesh_tensors.items():
+        out[k] = v.to(device) if torch.is_tensor(v) else v
+    return out
+
+
+def write_finetune_horefine_style_mp4(
+    trainer: Trainer,
+    cfg: Any,
+    batch: dict,
+    output: dict,
+    B_in_cams: torch.Tensor,
+    seq_name: str,
+    out_path: str,
+    bid: int = 0,
+    append_rgbm_panel: bool = True,
+) -> bool:
+    """
+    Same visualization path as run_1seq (render_front_side + comb_front_side + optional rgbm panel),
+    but SMPL/object vertices and RGB are taken from a collated training batch and forward outputs.
+    """
+    from argparse import Namespace
+
+    import imageio.v2 as imageio
+
+    hy3d = (os.environ.get("FINETUNE_HY3D_MESH", "") or "").strip() or getattr(cfg, "hy3d_meshes_root", None)
+    if not hy3d:
+        print("[finetune-viz] mesh skip: no hy3d_meshes_root / FINETUNE_HY3D_MESH")
+        return False
+    hy3d_s = str(hy3d)
+    if hy3d_s.lower().endswith(".obj"):
+        if not osp.isfile(hy3d_s):
+            print(f"[finetune-viz] mesh skip: HY3D obj missing: {hy3d_s}")
+            return False
+    elif not osp.isdir(hy3d_s):
+        print(f"[finetune-viz] mesh skip: hy3d_meshes_root not a dir or .obj: {hy3d_s}")
+        return False
+
+    try:
+        device = trainer.accelerator.device
+        _run_args = Namespace(
+            rend_size=224,
+            wild_video=bool(getattr(cfg, "wild_video", False)),
+            data_source=str(getattr(cfg, "data_source", "behave")),
+            video=str(getattr(cfg, "video", "") or "dummy.mp4"),
+        )
+        runner = HORefineRunner(_run_args)
+        runner.cfg = cfg
+        runner.side_view_z = None
+
+        center = np.zeros(3, dtype=np.float32) if not _run_args.wild_video else None
+        # Must use scene mesh_tensors from load_smpl_obj_uvmap (SMPL+obj faces / uv), same as run_1seq — not object-only.
+        mesh_tensors, meshes = load_smpl_obj_uvmap(seq_name, use_hy3d=True, meshes_root=hy3d_s)
+        mesh_tensors = _mesh_tensors_to_device(mesh_tensors, device)
+        obj_idx = 1
+        verts_obj_base_t = meshes[obj_idx].verts_padded()[0].to(device).float()
+        if center is None:
+            center = np.mean(verts_obj_base_t.detach().cpu().numpy(), axis=0).astype(np.float32)
+        obj_base_centered = verts_obj_base_t - torch.as_tensor(center, device=device, dtype=torch.float)
+        glctx = dr.RasterizeCudaContext()
+
+        try:
+            gender = _sub_gender[seq_name.split("_")[1]]
+        except (IndexError, KeyError):
+            gender = "male" if bool(batch["is_male"].reshape(-1)[0].item()) else "female"
+        body_model = get_smpl(gender, hands=True).to(device)
+
+        pose_in = batch["pose_perturbed"].float()
+        pose_gt = batch["pose_gt"].float()
+        T = pose_in.shape[1]
+
+        nlf_p = batch["nlf_poses"][bid].reshape(T, -1).float().to(device)
+        if nlf_p.shape[-1] != 156:
+            raise ValueError(f"expected nlf_poses last dim 156, got {nlf_p.shape}")
+        betas_gt_bt = batch["betas_gt"][bid].reshape(T, 10).float().to(device)
+        nlf_trans_bt = batch["nlf_transl"][bid].reshape(T, 3).float().to(device)
+        verts_nlf = body_model(nlf_p, betas_gt_bt, nlf_trans_bt)[0]
+
+        R_in = pose_in[bid, :, :3, :3].to(device)
+        t_in = pose_in[bid, :, :3, 3].to(device)
+        obj_v_in = torch.matmul(obj_base_centered[None].expand(T, -1, -1), R_in.permute(0, 2, 1)) + t_in[:, None]
+        verts_comb_in = torch.cat([verts_nlf, obj_v_in], dim=1)
+
+        # run_1seq step 7: pose72to156 + betas_gt + pred_smpl_t (same as lines 503–544).
+        _, pred_smpl_pose72_bt, _, pred_smpl_t_bt = trainer.smpl_params_from_pred(batch, output)
+        pred_smpl_pose156 = pose72to156(
+            pred_smpl_pose72_bt[bid * T : (bid + 1) * T].reshape(T, -1).float().to(device)
+        )
+        pred_smpl_t = pred_smpl_t_bt[bid * T : (bid + 1) * T].reshape(T, 3).float().to(device)
+        verts_pr = body_model(pred_smpl_pose156, betas_gt_bt, pred_smpl_t)[0]
+        R_pr = B_in_cams[bid, :, :3, :3].float().to(device)
+        t_pr = B_in_cams[bid, :, :3, 3].float().to(device)
+        obj_v_pr = torch.matmul(obj_base_centered[None].expand(T, -1, -1), R_pr.permute(0, 2, 1)) + t_pr[:, None]
+        verts_comb_pr = torch.cat([verts_pr, obj_v_pr], dim=1)
+
+        gt156 = batch["smpl_poses_gt"][bid].reshape(T, -1).float().to(device)
+        verts_gt = body_model(
+            gt156,
+            betas_gt_bt,
+            batch["smpl_transl_gt"][bid].reshape(T, 3).float().to(device),
+        )[0]
+        R_gt = pose_gt[bid, :, :3, :3].to(device)
+        t_gt = pose_gt[bid, :, :3, 3].to(device)
+        obj_v_gt = torch.matmul(obj_base_centered[None].expand(T, -1, -1), R_gt.permute(0, 2, 1)) + t_gt[:, None]
+        verts_comb_gt = torch.cat([verts_gt, obj_v_gt], dim=1)
+
+        rgbb = (batch["input_rgbs"][bid].detach().cpu().numpy().transpose(0, 2, 3, 1) * 255.0).clip(0, 255).astype(
+            np.uint8
+        )
+        H, W = int(rgbb.shape[1]), int(rgbb.shape[2])
+        Ks_bt = batch["K_rois"][bid].detach().cpu().numpy()
+
+        # Same render order as run_1seq after optimization: pred, input, then GT.
+        # Per-frame K_roi: ROI intrinsics can change each frame in VideoDataset.
+        _, rend_pr, rend_pr_side, _ = runner.render_front_side_Ks(H, W, Ks_bt, glctx, mesh_tensors, verts_comb_pr)
+        _, rend_in, rend_in_side, _ = runner.render_front_side_Ks(H, W, Ks_bt, glctx, mesh_tensors, verts_comb_in)
+        rend_gt, rend_gt_side = None, None
+        if not cfg.wild_video:
+            _, rend_gt, rend_gt_side, _ = runner.render_front_side_Ks(H, W, Ks_bt, glctx, mesh_tensors, verts_comb_gt)
+
+        viz_input = bool(getattr(cfg, "viz_input", True))
+        if viz_input and append_rgbm_panel:
+            maskA, maskB, rgbsA, rgbsB, xyzA, xyzB = trainer.prepare_input_viz(batch, cfg)
+
+        if osp.exists(out_path):
+            os.remove(out_path)
+        vw = imageio.get_writer(out_path, fps=15)
+        try:
+            for j in tqdm(range(T)):
+                color = rgbb[j]
+                in_comb = runner.comb_front_side(color, rend_in[j], rend_in_side[j])
+                pr_comb = runner.comb_front_side(color, rend_pr[j], rend_pr_side[j])
+                rgb_comb = runner.comb_front_side(color, color, color)
+                combs = [rgb_comb, in_comb, pr_comb]
+                if not cfg.wild_video:
+                    gt_comb = runner.comb_front_side(color, rend_gt[j], rend_gt_side[j])
+                    combs.append(gt_comb)
+                    h0, w0 = color.shape[:2]
+                    x1, x2 = int(w0 * 0.15), int(w0 * 0.85)
+                    y1, y2 = int(h0 * 0.15), int(h0 * 1.0)
+                    _pr_side = rend_pr_side[j][y1:y2, x1:x2]
+                    _gt_side = rend_gt_side[j][y1:y2, x1:x2]
+
+                comb = np.concatenate(combs, axis=1)
+                if batch.get("image_files") is not None:
+                    try:
+                        frame_tag = str(batch["image_files"][bid][j])
+                    except Exception:
+                        frame_tag = f"f{j}"
+                else:
+                    frame_tag = f"f{j}"
+                cv2.putText(
+                    comb,
+                    frame_tag,
+                    (comb.shape[1] // 4, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 255, 255),
+                    2,
+                )
+
+                if viz_input and append_rgbm_panel:
+                    comb_in, rgba, rgbb = trainer.visualize_rgbm(batch, bid, j, maskA, maskB, rgbsA, rgbsB)
+                    xyza_vis = (np.clip(xyzA[bid, j].transpose(1, 2, 0) + 0.5, 0, 1.0) * 255).astype(np.uint8)
+                    xyzb_vis = (np.clip(xyzB[bid, j].transpose(1, 2, 0) + 0.5, 0, 1.0) * 255).astype(np.uint8)
+                    comb_in = np.concatenate([comb_in, np.concatenate([xyza_vis, xyzb_vis], 0)], axis=1)
+                    hc, hi, wi = comb.shape[0], comb_in.shape[0], comb_in.shape[1]
+                    comb_in = cv2.resize(comb_in, (int(wi * hc / hi), hc))
+                    comb = np.concatenate([comb, comb_in], axis=1)
+
+                vw.append_data(comb)
+        finally:
+            vw.close()
+        print(f"[finetune-viz] horefine-style mesh grid -> {out_path}")
+        return True
+    except Exception as ex:
+        print(f"[finetune-viz] mesh grid failed ({ex}); falling back to box viz")
+        return False
+
 
 def main():
     from argparse import Namespace

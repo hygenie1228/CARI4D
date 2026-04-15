@@ -378,6 +378,8 @@ class TrainTemporalRefinerConfig:
     exp_name:Optional[str] = None
     save_dir: Optional[str] = 'experiments'
     vis_every_n_steps: int = 100 # visualize input every n steps
+    # Extra forward in eval() to log delta trans MAE like run_horefine (BN running stats). 0 = off.
+    log_loss_t_eval_every_n_steps: int = 1
     log_errors: bool = False # add errors to the visualization images
 
     max_step_val: int = 20
@@ -463,4 +465,11 @@ class TrainTemporalRefinerConfig:
     align2gt: bool = True  # align the predicted pose to the GT pose
     result_dir: str = 'none' # path to pth files
     use_hy3d: bool = True # the reconstruction was done using HY3D reconstructed mesh
+
+    # Finetune MP4 export (trainer shares train dataloader batch; see FINETUNE_* env in scripts/finetune.py)
+    finetune_exp_dir: Optional[str] = None  # e.g. <exp_dir>; writes finetuning_*_epochNNN.mp4 there
+    finetune_viz_epochs: List[int] = field(default_factory=list)  # 1-based epoch indices
+
+    # Debug: after CoCONet forward, replace predicted object delta rot with GT (ablation only).
+    debug_force_gt_obj_rot: bool = False
 
