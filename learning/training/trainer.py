@@ -245,6 +245,58 @@ class Trainer(object):
                 out["frame_ids"] = [str(x) for x in list(imgs)]
         return out
 
+    @staticmethod
+    def coconet_gt_fingerprint(batch) -> str:
+        """Stable hash of GT-relevant supervision for train/viz equality checks."""
+        parts: dict = {}
+        keys = (
+            "pose_gt",
+            "delta_transl",
+            "delta_rot",
+            "smpl_poses_gt",
+            "smpl_transl_gt",
+            "betas_gt",
+            "frame_mask",
+        )
+        for k in keys:
+            if k not in batch:
+                continue
+            v = batch[k]
+            if torch.is_tensor(v):
+                parts[k] = Trainer._tensor_fingerprint(v)
+            elif isinstance(v, np.ndarray):
+                parts[k] = Trainer._tensor_fingerprint(torch.from_numpy(v.astype(np.float32)))
+        if "image_files" in batch:
+            imgs = batch["image_files"]
+            if torch.is_tensor(imgs):
+                frame_ids = [str(x) for x in imgs.detach().cpu().numpy().tolist()]
+            else:
+                frame_ids = [str(x) for x in list(imgs)]
+            parts["frame_ids_sha1"] = hashlib.sha1(
+                json.dumps(frame_ids, ensure_ascii=True).encode("utf-8")
+            ).hexdigest()
+        packed = json.dumps(parts, sort_keys=True, ensure_ascii=True)
+        return hashlib.sha1(packed.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def coconet_model_input_fingerprint(batch) -> str:
+        """Hash ONLY tensors directly fed to CoCoNet model.forward in forward_batch()."""
+        parts = Trainer.coconet_model_input_fingerprint_parts(batch)
+        packed = json.dumps(parts, sort_keys=True, ensure_ascii=True)
+        return hashlib.sha1(packed.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def coconet_model_input_fingerprint_parts(batch) -> dict[str, str]:
+        # forward_batch(): model(cat([render_rgbs, render_xyz], 2), cat([input_rgbs, input_xyz], 2), poseA_norm, batch)
+        in_a = torch.cat([batch["render_rgbs"], batch["render_xyz"]], 2)
+        in_b = torch.cat([batch["input_rgbs"], batch["input_xyz"]], 2)
+        pose_p = batch["poseA_norm"]
+        return {
+            "in_a": Trainer._tensor_fingerprint(in_a),
+            "in_b": Trainer._tensor_fingerprint(in_b),
+            "poseA_norm": Trainer._tensor_fingerprint(pose_p),
+        }
+
     def _log_metrics(self, log_dict: dict, step: int) -> None:
         """Log to wandb (if enabled) and TensorBoard (scalars only)."""
         if self.accelerator.is_main_process and (not self.cfg.no_wandb):
@@ -303,63 +355,24 @@ class Trainer(object):
                 epochs = sorted({int(x) for x in list(ve)})
         return fe_dir, epochs
 
-    def _export_finetune_epoch_videos(self, batch, epoch_1based: int, finetune_exp_dir: str) -> None:
+    def _export_finetune_epoch_videos(
+        self, batch, epoch_1based: int, finetune_exp_dir: str
+    ) -> tuple[Optional[float], Optional[str], Optional[str], Optional[dict[str, str]]]:
         """Write finetuning_input (simple box) and finetuning_output (HoRefine-style mesh grid when possible)."""
         if not self.accelerator.is_main_process:
-            return
-        import imageio.v2 as imageio
+            return None, None, None, None
 
         cfg = self.cfg
         model = self.model
         was_training = model.training
-        model.eval()
-        with torch.no_grad():
-            B = batch["pose_perturbed"].shape[0]
-            rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = self.forward_batch(
-                batch, cfg, model, vis=False, ret_dict=True
-            )
-            _, _, _, rgbsB, _, _ = self.prepare_input_viz(batch, cfg)
-            poseA = batch["pose_perturbed"]
-            B_in_cams, B_in_cams_gt = self.compute_abspose(
-                B, batch, cfg, poseA, rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output
-            )
-            bid = 0
-            to_origin = batch["to_origin"][bid].cpu().numpy()
-            bbox = batch["obj_bbox_3d"][bid].cpu().numpy()
-            clip_len = rgbsB.shape[1]
-            frames_in, frames_out_simple = [], []
-            for i in range(clip_len):
-                K = batch["K_rois"][bid, i].cpu().numpy()
-                rgbb = rgbsB[bid, i].transpose(1, 2, 0)
-                center_pose_in = poseA[bid, i].cpu().numpy() @ np.linalg.inv(to_origin)
-                center_pose_pr = B_in_cams[bid, i].detach().cpu().numpy() @ np.linalg.inv(to_origin)
-                center_pose_gt = B_in_cams_gt[bid, i].cpu().numpy() @ np.linalg.inv(to_origin)
-                vin = rgbb.copy()
-                vin = Utils.draw_posed_3d_box(
-                    K, img=vin, ob_in_cam=center_pose_in, bbox=bbox, line_color=(255, 0, 0)
-                )
-                vin = Utils.draw_xyz_axis(
-                    vin, ob_in_cam=center_pose_in, scale=0.1, K=K, thickness=3, transparency=0, is_input_rgb=True
-                )
-                vout = rgbb.copy()
-                vout = Utils.draw_posed_3d_box(
-                    K, img=vout, ob_in_cam=center_pose_gt, bbox=bbox, line_color=(0, 255, 0)
-                )
-                vout = Utils.draw_xyz_axis(
-                    vout, ob_in_cam=center_pose_gt, scale=0.1, K=K, thickness=3, transparency=0, is_input_rgb=True
-                )
-                vout = Utils.draw_posed_3d_box(
-                    K, img=vout, ob_in_cam=center_pose_pr, bbox=bbox, line_color=(0, 255, 255)
-                )
-                vout = Utils.draw_xyz_axis(
-                    vout, ob_in_cam=center_pose_pr, scale=0.1, K=K, thickness=3, transparency=0, is_input_rgb=True
-                )
-                frames_in.append(vin)
-                frames_out_simple.append(vout)
-        model.train(was_training)
+        viz_loss_t_eval = None
+        viz_gt_fp = None
+        viz_input_parts = None
+        viz_input_fp = None
         out_in = osp.join(finetune_exp_dir, f"finetuning_input_epoch{epoch_1based:03d}.mp4")
         out_out = osp.join(finetune_exp_dir, f"finetuning_output_epoch{epoch_1based:03d}.mp4")
 
+        bid = 0
         seq_name = os.environ.get("FINETUNE_SEQ_NAME", "").strip()
         if not seq_name and batch.get("image_files") is not None:
             try:
@@ -465,7 +478,18 @@ class Trainer(object):
                 _default_tensor_type_before = torch.tensor(0.0).type()
                 model.eval()
                 with torch.no_grad():
-                    runner.run_1seq(args, cfg_viz, evaluator, self, errors_all, [])
+                    _stats = runner.run_1seq(args, cfg_viz, evaluator, self, errors_all, [])
+                    if _stats is None:
+                        _stats = getattr(runner, "last_run_1seq_stats", None)
+                    if _stats is None:
+                        raise RuntimeError("run_1seq did not return stats for viz comparison")
+                    viz_loss_t_eval = _stats.get("loss_t_viz", _stats.get("viz_loss_t_eval", None))
+                    _gt_fps = _stats.get("gt_fps", []) or []
+                    _in_fps = _stats.get("input_fps", []) or []
+                    _in_parts = _stats.get("input_parts", []) or []
+                    viz_gt_fp = _gt_fps[-1] if len(_gt_fps) > 0 else None
+                    viz_input_fp = _in_fps[-1] if len(_in_fps) > 0 else None
+                    viz_input_parts = _in_parts[-1] if len(_in_parts) > 0 else None
                 if _default_tensor_type_before == "torch.FloatTensor":
                     torch.set_default_tensor_type(torch.FloatTensor)
                 elif _default_tensor_type_before == "torch.cuda.FloatTensor":
@@ -518,7 +542,9 @@ class Trainer(object):
                 f"[finetune-viz] run_horefine did not produce input video: {out_in}. "
                 "Fallback visualization is disabled by user request."
             )
+        model.train(was_training)
         print(f"[finetune-viz] wrote {out_in} and {out_out} (mesh_grid={mesh_ok})")
+        return viz_loss_t_eval, viz_gt_fp, viz_input_fp, viz_input_parts
 
     def train(self):
         cfg = self.cfg
@@ -551,6 +577,82 @@ class Trainer(object):
                 f"loss_t_eval_avg=mean of eval-forward delta MAE when log_loss_t_eval_every_n_steps>0)"
             )
 
+        def _append_finetune_viz_compare_log(
+            epoch_1based: int,
+            train_loss_t_eval_avg: Optional[float],
+            viz_loss_t_eval: Optional[float],
+            train_eval_gt_fps: Optional[list[str]] = None,
+            viz_gt_fp: Optional[str] = None,
+            train_eval_input_fps: Optional[list[str]] = None,
+            viz_input_fp: Optional[str] = None,
+            train_eval_input_parts: Optional[list[dict[str, str]]] = None,
+            viz_input_parts: Optional[dict[str, str]] = None,
+        ) -> None:
+            if (not finetune_log_file) or (not accelerator.is_main_process):
+                return
+            os.makedirs(osp.dirname(finetune_log_file), exist_ok=True)
+            tag = f" tag={finetune_chunk_tag}" if finetune_chunk_tag else ""
+            train_part = "nan" if train_loss_t_eval_avg is None else f"{train_loss_t_eval_avg:.8f}"
+            viz_part = "nan" if viz_loss_t_eval is None else f"{viz_loss_t_eval:.8f}"
+            diff_part = "nan"
+            if (train_loss_t_eval_avg is not None) and (viz_loss_t_eval is not None):
+                diff_part = f"{(viz_loss_t_eval - train_loss_t_eval_avg):.8f}"
+            gt_fps = sorted(set(train_eval_gt_fps or []))
+            gt_unique = len(gt_fps)
+            if gt_unique == 0:
+                train_gt_part = "na"
+                gt_match = "na"
+            elif gt_unique == 1:
+                train_gt_part = gt_fps[0]
+                gt_match = "na" if viz_gt_fp is None else str(viz_gt_fp == gt_fps[0])
+            else:
+                train_gt_part = "multi"
+                gt_match = "na" if viz_gt_fp is None else str(viz_gt_fp in gt_fps)
+            viz_gt_part = "na" if viz_gt_fp is None else viz_gt_fp
+            input_fps = sorted(set(train_eval_input_fps or []))
+            input_unique = len(input_fps)
+            if input_unique == 0:
+                train_input_part = "na"
+                input_match = "na"
+            elif input_unique == 1:
+                train_input_part = input_fps[0]
+                input_match = "na" if viz_input_fp is None else str(viz_input_fp == input_fps[0])
+            else:
+                train_input_part = "multi"
+                input_match = "na" if viz_input_fp is None else str(viz_input_fp in input_fps)
+            viz_input_part = "na" if viz_input_fp is None else viz_input_fp
+            part_hist = train_eval_input_parts or []
+
+            def _part_field_log(field: str) -> tuple[str, str, str, int]:
+                vals = sorted({p[field] for p in part_hist if field in p})
+                n = len(vals)
+                vz = None if viz_input_parts is None else viz_input_parts.get(field)
+                if n == 0:
+                    return "na", ("na" if vz is None else vz), "na", 0
+                if n == 1:
+                    tr = vals[0]
+                    mt = "na" if vz is None else str(vz == tr)
+                    return tr, ("na" if vz is None else vz), mt, 1
+                mt = "na" if vz is None else str(vz in vals)
+                return "multi", ("na" if vz is None else vz), mt, n
+
+            train_in_a_fp, viz_in_a_fp, in_a_match, in_a_unique = _part_field_log("in_a")
+            train_in_b_fp, viz_in_b_fp, in_b_match, in_b_unique = _part_field_log("in_b")
+            train_pose_fp, viz_pose_fp, pose_match, pose_unique = _part_field_log("poseA_norm")
+            line = (
+                f"viz_compare{tag} epoch={epoch_1based} step={train_state.step} "
+                f"train_loss_t_eval_avg={train_part} viz_loss_t_eval={viz_part} diff={diff_part} "
+                f"train_gt_fp={train_gt_part} viz_gt_fp={viz_gt_part} gt_match={gt_match} gt_unique={gt_unique} "
+                f"train_input_fp={train_input_part} viz_input_fp={viz_input_part} "
+                f"input_match={input_match} input_unique={input_unique} "
+                f"train_in_a_fp={train_in_a_fp} viz_in_a_fp={viz_in_a_fp} in_a_match={in_a_match} in_a_unique={in_a_unique} "
+                f"train_in_b_fp={train_in_b_fp} viz_in_b_fp={viz_in_b_fp} in_b_match={in_b_match} in_b_unique={in_b_unique} "
+                f"train_poseA_norm_fp={train_pose_fp} viz_poseA_norm_fp={viz_pose_fp} poseA_norm_match={pose_match} poseA_norm_unique={pose_unique}\n"
+            )
+            with open(finetune_log_file, "a", encoding="utf-8") as f:
+                f.write(line)
+            print(f"[train] appended viz comparison to {finetune_log_file}: {line.strip()}")
+
         def _write_finetune_input_fingerprint(batch_obj, which: str) -> bool:
             if (not finetune_log_file) or (not accelerator.is_main_process) or batch_obj is None:
                 return False
@@ -581,6 +683,9 @@ class Trainer(object):
             total_loss_t = 0.0
             total_loss_t_eval = 0.0
             n_loss_t_eval = 0
+            loss_t_eval_gt_fps_epoch: list[str] = []
+            loss_t_eval_input_fps_epoch: list[str] = []
+            loss_t_eval_input_parts_epoch: list[dict[str, str]] = []
             last_loss_t_eval_epoch_avg = None
             epoch_last_batch = None
 
@@ -634,6 +739,9 @@ class Trainer(object):
                         loss_t_eval_f = float(loss_t_eval.item())
                     total_loss_t_eval += loss_t_eval_f
                     n_loss_t_eval += 1
+                    loss_t_eval_gt_fps_epoch.append(self.coconet_gt_fingerprint(batch))
+                    loss_t_eval_input_fps_epoch.append(self.coconet_model_input_fingerprint(batch))
+                    loss_t_eval_input_parts_epoch.append(self.coconet_model_input_fingerprint_parts(batch))
                     if accelerator.is_main_process:
                         self._log_metrics({"train/loss_t_eval": loss_t_eval_f}, train_state.step)
 
@@ -680,11 +788,29 @@ class Trainer(object):
                 last_loss_t_value = float(avg_loss_t)
                 accelerator.print(f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss: {avg_loss:.4f} ---")
                 accelerator.print(f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss_t: {avg_loss_t:.4f} ---")
-                if n_loss_t_eval > 0:
-                    avg_te = total_loss_t_eval / n_loss_t_eval
-                    last_loss_t_eval_epoch_avg = float(avg_te)
+                if epoch_last_batch is not None:
+                    # Recompute on the final model state (post-optimizer updates), model.eval(),
+                    # using the exact batch that will be used by visualization.
+                    was_training_epoch_end = model.training
+                    model.eval()
+                    with torch.no_grad():
+                        _, _, trans_delta_gt_e, trans_delta_pred_e, _ = self.forward_batch(
+                            epoch_last_batch, cfg, model, vis=False, ret_dict=True
+                        )
+                        fm = epoch_last_batch["frame_mask"].unsqueeze(-1)
+                        bs, ts = fm.shape[:2]
+                        loss_t_eval_post = (
+                            torch.abs(trans_delta_pred_e - trans_delta_gt_e).reshape(bs, ts, -1) * fm
+                        ).mean()
+                    model.train(was_training_epoch_end)
+                    last_loss_t_eval_epoch_avg = float(loss_t_eval_post.item())
+                    # Align GT/input fingerprints with the same eval-time batch.
+                    loss_t_eval_gt_fps_epoch = [self.coconet_gt_fingerprint(epoch_last_batch)]
+                    loss_t_eval_input_fps_epoch = [self.coconet_model_input_fingerprint(epoch_last_batch)]
+                    loss_t_eval_input_parts_epoch = [self.coconet_model_input_fingerprint_parts(epoch_last_batch)]
                     accelerator.print(
-                        f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Average Loss_t_eval (viz-match): {avg_te:.6f} ---"
+                        f"--- End of Epoch [{epoch + 1}/{cfg.num_epochs}], Loss_t_eval (post-update, viz-batch): "
+                        f"{last_loss_t_eval_epoch_avg:.6f} ---"
                     )
                 if (
                     finetune_log_file
@@ -709,7 +835,20 @@ class Trainer(object):
                 if osp.isfile(step_pth):
                     shutil.copy2(step_pth, ep_pth)
                     print(f"[finetune-viz] saved {ep_pth}")
-                self._export_finetune_epoch_videos(epoch_last_batch, completed_1based, fe_dir)
+                viz_loss_t_eval, viz_gt_fp, viz_input_fp, viz_input_parts = self._export_finetune_epoch_videos(
+                    epoch_last_batch, completed_1based, fe_dir
+                )
+                _append_finetune_viz_compare_log(
+                    epoch_1based=completed_1based,
+                    train_loss_t_eval_avg=last_loss_t_eval_epoch_avg,
+                    viz_loss_t_eval=viz_loss_t_eval,
+                    train_eval_gt_fps=loss_t_eval_gt_fps_epoch,
+                    viz_gt_fp=viz_gt_fp,
+                    train_eval_input_fps=loss_t_eval_input_fps_epoch,
+                    viz_input_fp=viz_input_fp,
+                    train_eval_input_parts=loss_t_eval_input_parts_epoch,
+                    viz_input_parts=viz_input_parts,
+                )
             train_state.epoch += 1
         if accelerator.is_main_process:
             self.save_checkpoint(accelerator, cfg, model, optimizer, scheduler, train_state)

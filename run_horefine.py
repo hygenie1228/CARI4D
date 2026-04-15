@@ -245,6 +245,11 @@ class HORefineRunner(BehaveFPNLFRenderer):
         keys = ['pose_abs', 'smpl_pose', 'smpl_t', 'frames', 'betas', 'verts', 'contact_logits']
         data_gt, data_pr, data_in = {k: [] for k in keys}, {k: [] for k in keys}, {k: [] for k in keys}
         self.side_view_z = None # to render side view
+        # Stats for in-run comparison logging in trainer.
+        loss_t_eval_vals = []
+        gt_fps = []
+        input_fps = []
+        input_parts = []
 
         vis_input = True
         if vis_input:
@@ -490,6 +495,22 @@ class HORefineRunner(BehaveFPNLFRenderer):
                                                                                                     trainer.model,
                                                                                                     ret_dict=True,
                                                                                                     vis=False)
+                # Record comparison metrics/fingerprints INSIDE run_1seq.
+                fm = batch.get('frame_mask', None)
+                if fm is None:
+                    bs, ts = batch['pose_perturbed'].shape[:2]
+                    fm = torch.ones((bs, ts), device=trans_delta_pred.device, dtype=trans_delta_pred.dtype)
+                fm = fm.unsqueeze(-1)
+                bs, ts = fm.shape[:2]
+                loss_t_eval_vals.append(
+                    float((torch.abs(trans_delta_pred - trans_delta_gt).reshape(bs, ts, -1) * fm).mean().item())
+                )
+                if hasattr(trainer, "coconet_gt_fingerprint"):
+                    gt_fps.append(trainer.coconet_gt_fingerprint(batch))
+                if hasattr(trainer, "coconet_model_input_fingerprint"):
+                    input_fps.append(trainer.coconet_model_input_fingerprint(batch))
+                if hasattr(trainer, "coconet_model_input_fingerprint_parts"):
+                    input_parts.append(trainer.coconet_model_input_fingerprint_parts(batch))
 
                 # update object pose
                 prep = {}
@@ -666,6 +687,15 @@ class HORefineRunner(BehaveFPNLFRenderer):
         data_in = {k: torch.cat(v, 0) if k != 'frames' and len(v) > 0 else v for k, v in data_in.items()}
         torch.save({"gt": data_gt, "pr": data_pr, "in": data_in}, pth_file)
         print(f'result saved to {pth_file}')
+        loss_t_viz = (float(np.mean(loss_t_eval_vals)) if len(loss_t_eval_vals) > 0 else None)
+        self.last_run_1seq_stats = {
+            "loss_t_viz": loss_t_viz,
+            "viz_loss_t_eval": loss_t_viz,  # backward-compatible key
+            "gt_fps": gt_fps,
+            "input_fps": input_fps,
+            "input_parts": input_parts,
+        }
+        return self.last_run_1seq_stats
 
     def comb_front_side(self, color, rp, rp_side):
         "rp: front view, rp_side: side view"
