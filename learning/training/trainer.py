@@ -533,6 +533,7 @@ class Trainer(object):
                         self,
                         errors_all,
                         [],
+                        batch,
                     )
                     if _stats is None:
                         _stats = getattr(runner, "last_run_1seq_stats", None)

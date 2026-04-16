@@ -24,6 +24,7 @@ from tqdm import tqdm
 import nvdiffrast.torch as dr
 from pytorch3d.renderer import look_at_view_transform
 from scipy.spatial.transform import Rotation as R
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import Utils
@@ -37,6 +38,7 @@ from behave_data.behave_video import load_masks
 from prep.render_fp_nlf import BehaveFPNLFRenderer
 from tools.eval_base import ModelEvaluator
 from learning.training.trainer import Trainer
+from learning.datasets.video_data_vis import HoRefineVisBatchLoader
 from lib_smpl import pose156to72, pose72to156, SMPL_ASSETS_ROOT
 import h5py
 
@@ -105,6 +107,99 @@ def normalized_trans_delta_gt_from_batch(batch: dict, cfg: Any) -> torch.Tensor:
     else:
         trans_delta_gt = trans_delta_gt / trans_normalizer
     return trans_delta_gt.reshape(B * T, 3)
+
+
+def collated_batch_item_for_delta_gt(batch: dict, bid: int = 0) -> dict:
+    """One element from a collated train batch: (B,T,·) -> (1,T,·) for delta GT normalization."""
+    dt = batch["delta_transl"]
+    if dt.shape[0] <= bid:
+        raise IndexError(f"batch index {bid} out of range for B={dt.shape[0]}")
+    out = dict(batch)
+    out["delta_transl"] = batch["delta_transl"][bid : bid + 1].clone()
+    out["mesh_diameter"] = batch["mesh_diameter"][bid : bid + 1].clone()
+    out["trans_normalizer"] = batch["trans_normalizer"][bid : bid + 1].clone()
+    for k in ("pose_perturbed", "pose_gt", "poseA_norm", "frame_mask"):
+        t = batch.get(k)
+        if torch.is_tensor(t) and t.shape[0] > bid:
+            out[k] = t[bid : bid + 1].clone()
+    return out
+
+
+def diagnose_trans_delta_gt_batch_diff(
+    batch_render: dict,
+    batch_train_item: dict,
+    cfg: Any,
+    prefix: str = "[run_1seq delta-gt diag]",
+) -> None:
+    """Explain differences in inputs to ``normalized_trans_delta_gt_from_batch`` (render vs train batch[0])."""
+    dev = torch.device("cpu")
+
+    def _f(x: torch.Tensor) -> torch.Tensor:
+        return x.detach().float().to(dev)
+
+    for k in ("delta_transl", "mesh_diameter", "trans_normalizer"):
+        if k not in batch_render or k not in batch_train_item:
+            print(f"{prefix} missing key {k!r} in one of the batches")
+            continue
+        a, b = _f(batch_render[k]), _f(batch_train_item[k])
+        if a.shape != b.shape:
+            print(f"{prefix} {k}: shape render {tuple(a.shape)} vs train {tuple(b.shape)}")
+            continue
+        d = (a - b).abs()
+        print(
+            f"{prefix} {k}: max_abs={float(d.max().item()):.6e} "
+            f"mean_abs={float(d.mean().item()):.6e}"
+        )
+
+    for pk in ("pose_perturbed", "pose_gt"):
+        if pk not in batch_render or pk not in batch_train_item:
+            continue
+        a = _f(batch_render[pk][:, :, :3, 3])
+        b = _f(batch_train_item[pk][:, :, :3, 3])
+        if a.shape != b.shape:
+            print(f"{prefix} {pk} translation: shape {tuple(a.shape)} vs {tuple(b.shape)}")
+            continue
+        d = (a - b).abs()
+        print(
+            f"{prefix} {pk} t_cam: max_abs={float(d.max().item()):.6e} "
+            f"mean_abs={float(d.mean().item()):.6e}"
+        )
+
+    # Isolate delta vs diameter scaling (normalize_xyz path).
+    dt_r = _f(batch_render["delta_transl"])
+    dt_t = _f(batch_train_item["delta_transl"])
+    mr_r = _f(batch_render["mesh_diameter"]) / 2.0
+    mr_t = _f(batch_train_item["mesh_diameter"]) / 2.0
+    if dt_r.shape != dt_t.shape or mr_r.shape != mr_t.shape:
+        return
+    B, T = dt_r.shape[:2]
+    if bool(cfg["normalize_xyz"]):
+        norm_r = (dt_r * (1.0 / mr_r.reshape(B, T, -1))).reshape(-1, 3)
+        norm_t = (dt_t * (1.0 / mr_t.reshape(B, T, -1))).reshape(-1, 3)
+        cross_r_delta = (dt_r * (1.0 / mr_t.reshape(B, T, -1))).reshape(-1, 3)
+        cross_t_delta = (dt_t * (1.0 / mr_r.reshape(B, T, -1))).reshape(-1, 3)
+        print(
+            f"{prefix} normalized GT: max|render-train|={(norm_r - norm_t).abs().max().item():.6e}"
+        )
+        print(
+            f"{prefix}  swap test: render delta + train diameter -> max|...-train_norm|="
+            f"{(cross_r_delta - norm_t).abs().max().item():.6e} "
+            f"(large => raw delta_transl differs)"
+        )
+        print(
+            f"{prefix}  swap test: train delta + render diameter -> max|...-render_norm|="
+            f"{(cross_t_delta - norm_r).abs().max().item():.6e} "
+            f"(large => raw delta_transl differs)"
+        )
+    else:
+        tn_r = _f(batch_render["trans_normalizer"])
+        tn_t = _f(batch_train_item["trans_normalizer"])
+        norm_r = (dt_r / tn_r).reshape(-1, 3)
+        norm_t = (dt_t / tn_t).reshape(-1, 3)
+        print(
+            f"{prefix} normalized GT (÷trans_normalizer): max|render-train|="
+            f"{(norm_r - norm_t).abs().max().item():.6e}"
+        )
 
 
 class HORefineRunner(BehaveFPNLFRenderer):
@@ -178,6 +273,9 @@ class HORefineRunner(BehaveFPNLFRenderer):
         if osp.isfile(pth_file):
             print(f'{pth_file} already exists, skipping')
             return
+
+        # HERE
+
 
         fp_root = cfg.fp_root
         fp_data = joblib.load(osp.join(fp_root, f'{seq_name}_all.pkl'))
@@ -279,11 +377,64 @@ class HORefineRunner(BehaveFPNLFRenderer):
         gt_fps = []
         input_fps = []
         input_parts = []
+        # Max |normalized delta_transl (render batch) - (metric/train batch)| per window when shapes match.
+        delta_gt_metric_vs_render_max_abs: list[float] = []
 
         vis_input = True
         if vis_input:
             out_path = osp.join(out_root, f'{save_name}+{seq_name}_it{cfg.refine_iters}_input.mp4')
             vw_input = imageio.get_writer(out_path, fps=15)
+        else:
+            vw_input = None
+        # Second reader for ``video_data_vis`` batch2: mp4 masks are sequential; main loop advances ``tar_mask``.
+        tar_mask_independent = tar_mask
+        _masks_root_vis = str(getattr(cfg, "masks_root", ""))
+        if "," in _masks_root_vis:
+            _mh, _mo = _masks_root_vis.split(",", 1)
+            if _mh.strip().lower().endswith(".mp4") and _mo.strip().lower().endswith(".mp4"):
+                tar_mask_independent = MP4MaskLoader(
+                    _mh.strip(), _mo.strip(), fps=float(getattr(args, "fps", 30))
+                )
+        horefine_vis_ctx = SimpleNamespace(
+            runner=self,
+            trainer=trainer,
+            args=args,
+            cfg=cfg,
+            device=device,
+            seq_name=seq_name,
+            video_prefix=video_prefix,
+            kid=kid,
+            enum_idx=enum_idx,
+            kids=kids,
+            packed=packed,
+            nlf_data=nlf_data,
+            fp_poses=fp_poses,
+            fp_frames=fp_frames,
+            frames_packed=frames_packed,
+            mesh_tensors=mesh_tensors,
+            mesh_tensors_obj=mesh_tensors_obj,
+            glctx=glctx,
+            render_size=render_size,
+            verts_obj_base=verts_obj_base,
+            gt_to_perturb_pose=gt_to_perturb_pose,
+            controllers=controllers,
+            tar_mask=tar_mask,
+            tar_mask_independent=tar_mask_independent,
+            body_model=body_model,
+            landmark=landmark,
+            mesh_diameter=mesh_diameter,
+            w2c_rots=w2c_rots,
+            w2c_trans=w2c_trans,
+            vis_input=vis_input,
+            vw_input=vw_input,
+            record_independent_vis=False,
+        )
+        vis_batch_loader = HoRefineVisBatchLoader(
+            batch_size=int(getattr(cfg, "vis_compare_batch_size", getattr(cfg, "batch_size", 1))),
+            ctx=horefine_vis_ctx,
+        )
+
+
         iou_debug_saved = False
         for start in tqdm(range(0, len(frames_packed), clip_len)):
             end = min(start + clip_len, len(frames_packed))
@@ -519,9 +670,27 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 batch['delta_transl'] = poseB[:, :, :3, 3] - poseA[:, :, :3, 3]
                 batch['delta_rot'] = torch.matmul(poseB[:, :, :3, :3], poseA[:, :, :3, :3].permute(0, 1, 3, 2))
 
+                # Second path: same batch construction as above, implemented in ``video_data_vis`` (forked mp4 reader).
+                batch2 = vis_batch_loader.getitem(start, end, B_in_cams_override=B_in_cams if it else None, prep_override=prep if it else None, verts_hum_override=verts_nlf_render if it else None)
+
                 trans_delta_gt2 = normalized_trans_delta_gt_from_batch(batch, cfg)
 
-                # the code after this line is correct!
+                mb0 = collated_batch_item_for_delta_gt(batch2, bid=0)
+                trans_delta_gt_vis = normalized_trans_delta_gt_from_batch(mb0, cfg)
+                if trans_delta_gt_vis.shape == trans_delta_gt2.shape:
+                    dmax = float((trans_delta_gt2 - trans_delta_gt_vis).abs().max().item())
+                    delta_gt_metric_vs_render_max_abs.append(dmax)
+                    if start == 0:
+                        diagnose_trans_delta_gt_batch_diff(batch, mb0, cfg)
+                else:
+                    print(
+                        f"[run_1seq] normalized delta_transl shape mismatch: "
+                        f"render {tuple(trans_delta_gt2.shape)} vs vis batch[0] {tuple(trans_delta_gt_vis.shape)} "
+                        f"(often different clip_len / frame window)"
+                    )
+
+                import pdb; pdb.set_trace() # do not remove !!!(for debugging)
+
                 rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = trainer.forward_batch(batch, cfg,
                                                                                                     trainer.model,
                                                                                                     ret_dict=True,
@@ -823,7 +992,13 @@ class HORefineRunner(BehaveFPNLFRenderer):
             "metric_batch_gt_fps": metric_batch_gt_fps,
             "metric_batch_input_fps": metric_batch_input_fps,
             "metric_batch_input_parts": metric_batch_input_parts,
+            "delta_transl_norm_train_vs_render_max_abs": (
+                max(delta_gt_metric_vs_render_max_abs) if delta_gt_metric_vs_render_max_abs else None
+            ),
         }
+        _dmax = self.last_run_1seq_stats["delta_transl_norm_train_vs_render_max_abs"]
+        if _dmax is not None:
+            print(f"[run_1seq] max |normalized delta_transl (render path) - (train batch)|: {_dmax:.6e}")
         return self.last_run_1seq_stats
 
     def comb_front_side(self, color, rp, rp_side):
