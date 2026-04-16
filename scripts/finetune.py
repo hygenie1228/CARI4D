@@ -917,11 +917,14 @@ def run_finetune(
     env["FINETUNE_CHUNK_TAG"] = f"full_epochs={num_epochs},ckpt={osp.basename(ckpt_for_train)}"
     env["FINETUNE_FORCE_SCHED_STEPS"] = "1"
     viz_targets = sorted({ep for ep in viz_epochs if 1 <= ep <= num_epochs})
+    # Always expose experiment paths for in-trainer HoRefine (pre_finetune log / vis_t_loss).
+    # viz_targets can be empty (e.g. num_epochs=1 while viz_epochs lists only >=2); epoch-end
+    # export still requires FINETUNE_VIZ_EPOCHS below.
+    env["FINETUNE_EXP_DIR"] = exp_dir
+    env["FINETUNE_SEQ_NAME"] = paths.seq_name
+    env["FINETUNE_HY3D_MESH"] = osp.join(exp_dir, "object", "model.obj")
     if viz_targets:
-        env["FINETUNE_EXP_DIR"] = exp_dir
         env["FINETUNE_VIZ_EPOCHS"] = ",".join(str(e) for e in viz_targets)
-        env["FINETUNE_SEQ_NAME"] = paths.seq_name
-        env["FINETUNE_HY3D_MESH"] = osp.join(exp_dir, "object", "model.obj")
     print(
         f"[train] scheduler num_training_steps={num_training_steps} "
         f"(steps/epoch={steps_per_epoch}, total_epochs={num_epochs})"
@@ -1148,7 +1151,7 @@ def main() -> None:
 
     if (args.start_frame is not None or args.end_frame is not None) and not args.force_rebuild:
         print("[prepare] start_frame/end_frame is set; enabling force_rebuild=True to apply slicing.")
-    force_rebuild = args.force_rebuild or (num_epochs <= 0) or (args.start_frame is not None) or (args.end_frame is not None)
+    force_rebuild = False # args.force_rebuild or (num_epochs <= 0) or (args.start_frame is not None) or (args.end_frame is not None)
     paths = prepare_data(
         exp_dir=exp_dir,
         start_frame=args.start_frame,

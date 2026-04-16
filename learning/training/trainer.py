@@ -410,15 +410,16 @@ class Trainer(object):
         batch,
         epoch_1based: int,
         finetune_exp_dir: str,
-    ) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    ) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
         """Write finetuning_input (simple box) and finetuning_output (HoRefine-style mesh grid when possible)."""
         if not self.accelerator.is_main_process:
-            return None, None, None
+            return None, None, None, None
 
         cfg = self.cfg
         model = self.model
         was_training = model.training
         viz_loss_t_render = None
+        viz_loss_t_render2 = None
         viz_loss_r = None
         viz_loss_hum_r = None
         out_in = osp.join(finetune_exp_dir, f"finetuning_input_epoch{epoch_1based:03d}.mp4")
@@ -542,6 +543,7 @@ class Trainer(object):
                         "loss_t_viz_render",
                         _stats.get("loss_t_viz", _stats.get("viz_loss_t_eval", None)),
                     )
+                    viz_loss_t_render2 = _stats.get("loss_t_viz_render2", None)
                     viz_loss_r = _stats.get(
                         "loss_r_viz_render",
                         _stats.get("loss_r_viz", None),
@@ -607,7 +609,7 @@ class Trainer(object):
             )
         self._set_model_mode(was_training)
         print(f"[finetune-viz] wrote {out_in} and {out_out} (mesh_grid={mesh_ok})")
-        return viz_loss_t_render, viz_loss_r, viz_loss_hum_r
+        return viz_loss_t_render, viz_loss_r, viz_loss_hum_r, viz_loss_t_render2
 
     def train(self):
         cfg = self.cfg
@@ -635,20 +637,19 @@ class Trainer(object):
         def _append_finetune_viz_compare_log(
             epoch_1based: int,
             train_t_loss: Optional[float],
-            viz_loss_t_render: Optional[float] = None,
+            vis_t_loss: Optional[float] = None,
+            vis_t_loss2: Optional[float] = None,
         ) -> None:
             if (not finetune_log_file) or (not accelerator.is_main_process):
                 return
             os.makedirs(osp.dirname(finetune_log_file), exist_ok=True)
             tag = f" tag={finetune_chunk_tag}" if finetune_chunk_tag else ""
-            # Canonical logging uses render-path t-loss for consistency with visualization quality.
-            train_t_log = viz_loss_t_render if viz_loss_t_render is not None else train_t_loss
-            train_t_part = "nan" if train_t_log is None else f"{train_t_log:.8f}"
-            viz_render_part = "nan" if viz_loss_t_render is None else f"{viz_loss_t_render:.8f}"
+            train_t_part = "nan" if train_t_loss is None else f"{train_t_loss:.8f}"
+            vis_part = "nan" if vis_t_loss is None else f"{vis_t_loss:.8f}"
+            vis2_part = "nan" if vis_t_loss2 is None else f"{vis_t_loss2:.8f}"
             line = (
                 f"viz_compare{tag} epoch={epoch_1based} step={train_state.step} "
-                f"train_t_loss={train_t_part} vis_t_loss={viz_render_part} "
-                f"viz_loss_t_render={viz_render_part}\n"
+                f"train_t_loss={train_t_part} vis_t_loss={vis_part} vis_t_loss2={vis2_part}\n"
             )
             with open(finetune_log_file, "a", encoding="utf-8") as f:
                 f.write(line)
@@ -656,22 +657,19 @@ class Trainer(object):
 
         def _append_finetune_prefinetune_log(
             train_t_loss: Optional[float],
-            vis_t_loss: Optional[float],
-            vis_t_loss_render: Optional[float] = None,
+            vis_t_loss: Optional[float] = None,
+            vis_t_loss2: Optional[float] = None,
         ) -> None:
             if (not finetune_log_file) or (not accelerator.is_main_process):
                 return
             os.makedirs(osp.dirname(finetune_log_file), exist_ok=True)
             tag = f" tag={finetune_chunk_tag}" if finetune_chunk_tag else ""
-            # Canonical logging uses render-path t-loss for consistency with visualization quality.
-            train_t_log = vis_t_loss_render if vis_t_loss_render is not None else train_t_loss
-            train_part = "nan" if train_t_log is None else f"{train_t_log:.8f}"
-            vis_render_part = "nan" if vis_t_loss_render is None else f"{vis_t_loss_render:.8f}"
+            train_part = "nan" if train_t_loss is None else f"{train_t_loss:.8f}"
+            vis_part = "nan" if vis_t_loss is None else f"{vis_t_loss:.8f}"
+            vis2_part = "nan" if vis_t_loss2 is None else f"{vis_t_loss2:.8f}"
             line = (
                 f"pre_finetune{tag} epoch={train_state.epoch} step={train_state.step} "
-                f"train_t_loss={train_part} vis_t_loss={vis_render_part} "
-                f"viz_loss_t_render={vis_render_part} "
-                "\n"
+                f"train_t_loss={train_part} vis_t_loss={vis_part} vis_t_loss2={vis2_part}\n"
             )
             with open(finetune_log_file, "a", encoding="utf-8") as f:
                 f.write(line)
@@ -701,7 +699,7 @@ class Trainer(object):
                 if (not pre_finetune_logged) and epoch == 0 and step == 0:
                     # Log baseline before any finetune optimizer update.
                     pre_train_t, pre_viz_t = None, None
-                    pre_viz_t_render = None
+                    pre_viz_t_render2 = None
                     with torch.no_grad():
                         self._set_model_mode(True)
                         _, _, trans_delta_gt_t0, trans_delta_pred_t0, out_dict_t0 = self.forward_batch(
@@ -715,7 +713,7 @@ class Trainer(object):
                         self._set_model_mode(True)
                     fe_dir_pref, _ = self._finetune_viz_schedule(cfg)
                     if fe_dir_pref:
-                        pre_viz_t, _, _ = self._export_finetune_epoch_videos(
+                        pre_viz_t, _, _, pre_viz_t_render2 = self._export_finetune_epoch_videos(
                             fixed_ref_batch,
                             0,
                             fe_dir_pref,
@@ -723,7 +721,7 @@ class Trainer(object):
                     _append_finetune_prefinetune_log(
                         pre_train_t,
                         pre_viz_t,
-                        pre_viz_t_render,
+                        pre_viz_t_render2,
                     )
                     pre_finetune_logged = True
                 # No need for .to(device), accelerate handles it!
@@ -820,13 +818,14 @@ class Trainer(object):
                 if osp.isfile(step_pth):
                     shutil.copy2(step_pth, ep_pth)
                     print(f"[finetune-viz] saved {ep_pth}")
-                viz_loss_t_render, viz_loss_r, viz_loss_hum_r = self._export_finetune_epoch_videos(
+                viz_loss_t_render, viz_loss_r, viz_loss_hum_r, viz_loss_t_render2 = self._export_finetune_epoch_videos(
                     ref_batch,
                     completed_1based,
                     fe_dir,
                 )
                 viz_metrics = {
                     "viz/loss_t": viz_loss_t_render if viz_loss_t_render is not None else float("nan"),
+                    "viz/loss_t2": viz_loss_t_render2 if viz_loss_t_render2 is not None else float("nan"),
                     "viz/loss_r": viz_loss_r if viz_loss_r is not None else float("nan"),
                     "viz/loss_hum_r": viz_loss_hum_r if viz_loss_hum_r is not None else float("nan"),
                 }
@@ -844,7 +843,8 @@ class Trainer(object):
                 _append_finetune_viz_compare_log(
                     epoch_1based=completed_1based,
                     train_t_loss=last_loss_t_value,
-                    viz_loss_t_render=viz_loss_t_render,
+                    vis_t_loss=viz_loss_t_render,
+                    vis_t_loss2=viz_loss_t_render2,
                 )
             train_state.epoch += 1
         if accelerator.is_main_process:

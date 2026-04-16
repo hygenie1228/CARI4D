@@ -91,6 +91,22 @@ class MP4MaskLoader:
         return mask_h, mask_o
 
 
+def normalized_trans_delta_gt_from_batch(batch: dict, cfg: Any) -> torch.Tensor:
+    """Object translation delta GT in the same normalized (BT, 3) space as ``Trainer.forward_batch``.
+
+    Mirrors ``trans_delta_gt`` derivation without running the model.
+    """
+    trans_delta_gt = batch["delta_transl"].clone()
+    mesh_radius = batch["mesh_diameter"] / 2.0
+    trans_normalizer = batch["trans_normalizer"]
+    B, T = trans_delta_gt.shape[:2]
+    if cfg["normalize_xyz"]:
+        trans_delta_gt = trans_delta_gt * (1.0 / mesh_radius.reshape(len(trans_delta_gt), T, -1))
+    else:
+        trans_delta_gt = trans_delta_gt / trans_normalizer
+    return trans_delta_gt.reshape(B * T, 3)
+
+
 class HORefineRunner(BehaveFPNLFRenderer):
     "refine both human and object"
 
@@ -257,6 +273,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
         self.side_view_z = None # to render side view
         # Stats for in-run comparison logging in trainer.
         loss_t_eval_vals = []
+        loss_t_eval_vals2 = []
         loss_r_eval_vals = []
         loss_hum_r_vals = []
         gt_fps = []
@@ -502,6 +519,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 batch['delta_transl'] = poseB[:, :, :3, 3] - poseA[:, :, :3, 3]
                 batch['delta_rot'] = torch.matmul(poseB[:, :, :3, :3], poseA[:, :, :3, :3].permute(0, 1, 3, 2))
 
+                trans_delta_gt2 = normalized_trans_delta_gt_from_batch(batch, cfg)
+
                 # the code after this line is correct!
                 rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = trainer.forward_batch(batch, cfg,
                                                                                                     trainer.model,
@@ -516,6 +535,9 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 bs, ts = fm.shape[:2]
                 loss_t_eval_vals.append(
                     float((torch.abs(trans_delta_pred - trans_delta_gt).reshape(bs, ts, -1) * fm).mean().item())
+                )
+                loss_t_eval_vals2.append(
+                    float((torch.abs(trans_delta_pred - trans_delta_gt2).reshape(bs, ts, -1) * fm).mean().item())
                 )
                 loss_func_v = F.l1_loss if 'l1' in str(cfg.loss_type) else F.mse_loss
                 loss_r_eval_vals.append(
@@ -719,6 +741,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
         print(f'result saved to {pth_file}')
         # Loss/metrics from the exact prediction used right before visualization rendering.
         loss_t_viz_render = (float(loss_t_eval_vals[-1]) if len(loss_t_eval_vals) > 0 else None)
+        loss_t_viz_render2 = (float(loss_t_eval_vals2[-1]) if len(loss_t_eval_vals2) > 0 else None)
         loss_r_viz_render = (float(loss_r_eval_vals[-1]) if len(loss_r_eval_vals) > 0 else None)
         loss_hum_r_viz_render = (float(loss_hum_r_vals[-1]) if len(loss_hum_r_vals) > 0 else None)
 
@@ -788,6 +811,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
             "loss_r_viz": loss_r_viz,
             "loss_hum_r_viz": loss_hum_r_viz,
             "loss_t_viz_render": loss_t_viz_render,
+            "loss_t_viz_render2": loss_t_viz_render2,
             "loss_r_viz_render": loss_r_viz_render,
             "loss_hum_r_viz_render": loss_hum_r_viz_render,
             "loss_t_viz_metric_batch": loss_t_viz_metric_batch,

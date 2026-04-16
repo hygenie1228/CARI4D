@@ -3,7 +3,7 @@ c_in: 6 # xyz + mask (3 channel, with full obj mask included)
 zfar: 'Infinity'
 debug: 2
 
-num_epochs: 256
+num_epochs: 1 # 256
 batch_size: 4
 num_workers: 4
 
