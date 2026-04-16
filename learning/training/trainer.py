@@ -603,13 +603,14 @@ class Trainer(object):
                 "[finetune-viz] run_horefine visualization was not produced (mesh_grid=False). "
                 "Fallback visualization is disabled by user request."
             )
-        if not osp.exists(out_in):
-            raise RuntimeError(
-                f"[finetune-viz] run_horefine did not produce input video: {out_in}. "
-                "Fallback visualization is disabled by user request."
-            )
         self._set_model_mode(was_training)
-        print(f"[finetune-viz] wrote {out_in} and {out_out} (mesh_grid={mesh_ok})")
+        if osp.exists(out_in):
+            print(f"[finetune-viz] wrote {out_in} and {out_out} (mesh_grid={mesh_ok})")
+        else:
+            print(
+                f"[finetune-viz] wrote {out_out} (mesh_grid={mesh_ok}); "
+                "input visualization intentionally skipped"
+            )
         return viz_loss_t_render, viz_loss_r, viz_loss_hum_r, viz_loss_t_render2
 
     def train(self):

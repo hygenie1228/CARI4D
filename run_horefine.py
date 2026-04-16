@@ -257,12 +257,17 @@ class HORefineRunner(BehaveFPNLFRenderer):
         errors_all,
         frames_all,
         metric_batch: Optional[dict] = None,
+        device: str = 'cuda',
     ):
-        device = 'cuda'
+        vis_batch_loader = HoRefineVisBatchLoader(
+            args=args,
+            cfg=cfg,
+            device=device,
+            batch_size=1,
+        )
+
         video_prefix = osp.basename(args.video).split('.')[0]
         if video_prefix == "video":
-            # Support staged experiments where input is exp_dir/video.mp4.
-            # Derive seq name from exp_dir basename: <seq>_<kid> -> <seq>.
             exp_base = osp.basename(osp.dirname(args.video.rstrip("/")))
             m = re.match(r"^(.+)_(\d+)$", exp_base)
             if m:
@@ -274,20 +279,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
             print(f'{pth_file} already exists, skipping')
             return
 
-        # HERE — rest of ctx is resolved lazily in ``learning/datasets/video_data_vis.py`` (run_1seq stack).
-        horefine_vis_ctx = SimpleNamespace(
-            runner=self,
-            trainer=trainer,
-            args=args,
-            cfg=cfg,
-            device=device,
-            seq_name=seq_name,
-            video_prefix=video_prefix,
-        )
-        vis_batch_loader = HoRefineVisBatchLoader(
-            batch_size=int(getattr(cfg, "vis_compare_batch_size", getattr(cfg, "batch_size", 1))),
-            ctx=horefine_vis_ctx,
-        )
 
         fp_root = cfg.fp_root
         fp_data = joblib.load(osp.join(fp_root, f'{seq_name}_all.pkl'))
@@ -392,7 +383,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
         # Max |normalized delta_transl (render batch) - (metric/train batch)| per window when shapes match.
         delta_gt_metric_vs_render_max_abs: list[float] = []
 
-        vis_input = True
+        vis_input = False
         if vis_input:
             out_path = osp.join(out_root, f'{save_name}+{seq_name}_it{cfg.refine_iters}_input.mp4')
             vw_input = imageio.get_writer(out_path, fps=15)
@@ -407,47 +398,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 tar_mask_independent = MP4MaskLoader(
                     _mh.strip(), _mo.strip(), fps=float(getattr(args, "fps", 30))
                 )
-        # horefine_vis_ctx = SimpleNamespace(
-        #     runner=self,
-        #     trainer=trainer,
-        #     args=args,
-        #     cfg=cfg,
-        #     device=device,
-        #     seq_name=seq_name,
-        #     video_prefix=video_prefix,
-        #     kid=kid,
-        #     enum_idx=enum_idx,
-        #     kids=kids,
-        #     packed=packed,
-        #     nlf_data=nlf_data,
-        #     fp_poses=fp_poses,
-        #     fp_frames=fp_frames,
-        #     frames_packed=frames_packed,
-        #     mesh_tensors=mesh_tensors,
-        #     mesh_tensors_obj=mesh_tensors_obj,
-        #     glctx=glctx,
-        #     render_size=render_size,
-        #     verts_obj_base=verts_obj_base,
-        #     gt_to_perturb_pose=gt_to_perturb_pose,
-        #     controllers=controllers,
-        #     tar_mask=tar_mask,
-        #     tar_mask_independent=tar_mask_independent,
-        #     body_model=body_model,
-        #     landmark=landmark,
-        #     mesh_diameter=mesh_diameter,
-        #     w2c_rots=w2c_rots,
-        #     w2c_trans=w2c_trans,
-        #     vis_input=vis_input,
-        #     vw_input=vw_input,
-        #     record_independent_vis=False,
-        # )
-        # vis_batch_loader = HoRefineVisBatchLoader(
-        #     batch_size=int(getattr(cfg, "vis_compare_batch_size", getattr(cfg, "batch_size", 1))),
-        #     ctx=horefine_vis_ctx,
-        # )
 
-
-        iou_debug_saved = False
         for start in tqdm(range(0, len(frames_packed), clip_len)):
             end = min(start + clip_len, len(frames_packed))
             if end - start < clip_len:
@@ -541,243 +492,158 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 K_rois.append(K_roi)
                 poses_perturbed.append(pose_fp.copy())
                 bboxes.append(bbox)
+
             # Initialization
             B_in_cams_init = np.stack(poses_perturbed, axis=0).copy()
             B_in_cams = torch.from_numpy(np.stack(poses_perturbed, axis=0).copy()).to(device).float()[None]
             verts_nlf_render = verts_nlf_render_init
             poses_nlf, betas_nlf, trans_nlf = poses_nlf_init, betas_gt, trans_nlf_init
 
-            # Render batch, which could be repeated iteratively
-            for it in range(iterations):
-                B_in_cams = B_in_cams.cpu().numpy()[0]
-                verts_obj_batch = [np.matmul(verts_obj_base, pose_fp[:3, :3].T) + pose_fp[:3, 3] for pose_fp in B_in_cams]
-                verts_hum_batch = verts_nlf_render.copy()
 
-                # Final input to the network
-                input_rgbs_final, input_xyz_final = [], []
-                render_rgbs, render_xyz = [], []
-                for fi in range(len(verts_obj_batch)):  # this is super fast, 4s
-                    # step 4: render combined (SMPL + object) inside ROI
-                    vh = verts_hum_batch[fi]  # (N_h, 3)
-                    vo = verts_obj_batch[fi]
-                    mesh_tensors['pos'] = torch.from_numpy(np.concatenate([vh, vo], 0)).float().cuda()
-                    mesh_tensors_obj['pos'] = torch.from_numpy(vo).float().cuda()
-                    bbox2d_ori = torch.tensor([[0, 0., render_size[0], render_size[1]]], device=device).repeat(1, 1)
-                    extra = {}
+            batch = vis_batch_loader.getitem(start, end)
 
-                    t2 = time.time()
-                    # TODO: do batch rendering
-                    rgb_r, depth_r, _ = Utils.nvdiffrast_render(K=np.stack([K_rois[fi]], 0), H=render_size[1],
-                                                                W=render_size[0],
-                                                                ob_in_cams=torch.as_tensor(np.eye(4)[None]).float(),
-                                                                context='cuda',
-                                                                get_normal=False, glctx=glctx,
-                                                                mesh_tensors=mesh_tensors,
-                                                                output_size=render_size, bbox2d=bbox2d_ori,
-                                                                use_light=True,
-                                                                extra=extra)
-                    rgb_obj, depth_obj, _ = Utils.nvdiffrast_render(K=np.stack([K_rois[fi]], 0), H=render_size[1],
-                                                                    W=render_size[0],
-                                                                    ob_in_cams=torch.as_tensor(np.eye(4)[None]).float(),
-                                                                    context='cuda',
-                                                                    get_normal=False, glctx=glctx,
-                                                                    mesh_tensors=mesh_tensors_obj,
-                                                                    output_size=render_size, bbox2d=bbox2d_ori,
-                                                                    use_light=True, extra=extra)
-                    rgbs = (rgb_r.cpu().numpy() * 255).astype(np.uint8)
-                    dmaps = depth_r.cpu().numpy()
+            # Compute GT object pose in camera coordinates (B, T, 4, 4)
+            # We already have R_cam and t_cam below when preparing GT rendering. Reuse packed loaded above.
+            angles_gt = packed['obj_angles'][start:end].astype(np.float32)
+            transl_gt = packed['obj_trans'][start:end].astype(np.float32)
+            R_wc = torch.from_numpy(w2c_rots[enum_idx]).to(device).float()
+            t_wc = torch.from_numpy(w2c_trans[enum_idx]).to(device).float()
+            R_obj = torch.from_numpy(R.from_rotvec(angles_gt).as_matrix()).to(device).float()  # (T, 3, 3)
+            t_world = torch.from_numpy(transl_gt).to(device).float()  # (T, 3)
+            R_cam = torch.matmul(R_wc[None].expand(end - start, -1, -1), R_obj)  # (T, 3, 3)
+            t_cam = torch.matmul(t_world, R_wc.T) + t_wc  # (T, 3)
+            pose_gt_mat = torch.eye(4, device=device, dtype=torch.float)[None].repeat(end - start, 1, 1)
+            pose_gt_mat[:, :3, :3] = R_cam
+            pose_gt_mat[:, :3, 3] = t_cam
+            batch['pose_gt'] = pose_gt_mat[None].clone()  # (B, T, 4, 4)
 
-                    dmap_full = depth_r[0].cpu().numpy()
-                    dmap_obj = depth_obj[0].cpu().numpy()
-                    mask_rend_o = (dmap_obj <= dmap_full) & (dmap_obj > 0)
-                    mask_o_full = dmap_obj > 0
+            poseA = batch['pose_perturbed']
+            poseB = batch['pose_gt']
+            # compute real delta
+            batch['delta_transl'] = poseB[:, :, :3, 3] - poseA[:, :, :3, 3]
+            batch['delta_rot'] = torch.matmul(poseB[:, :, :3, :3], poseA[:, :, :3, :3].permute(0, 1, 3, 2))
 
-                    dmap_xyz_init_np = Utils.depth2xyzmap(dmap_full, K_rois[fi])
-                    # unify to torch then store as numpy (H, W, 3)
-                    dmap_xyz_init = torch.from_numpy(dmap_xyz_init_np).permute(2, 0, 1).float()  # (3, H, W)
-                    # store temporarily as dict to allow mask augmentation below
-                    # render_xyz.append(dmap_xyz_init_t.cpu().numpy())
-                    t3 = time.time()
+            # Second path: same batch construction as above, implemented in ``video_data_vis`` (forked mp4 reader).
+            # batch2 = vis_batch_loader.getitem(start, end, B_in_cams_override=B_in_cams if it else None, prep_override=prep if it else None, verts_hum_override=verts_nlf_render if it else None)
+            
+            # _k1, _k2 = set(batch.keys()), set(batch2.keys())
+            # _mm = 0
+            # _only1 = sorted(_k1 - _k2)
+            # _only2 = sorted(_k2 - _k1)
+            # if _only1:
+            #     print(f"[batch-vs-batch2] only in batch: {_only1}")
+            #     _mm += len(_only1)
+            # if _only2:
+            #     print(f"[batch-vs-batch2] only in batch2: {_only2}")
+            #     _mm += len(_only2)
+            # for _k in sorted(_k1 & _k2):
+            #     _v1, _v2 = batch[_k], batch2[_k]
+            #     if torch.is_tensor(_v1) and torch.is_tensor(_v2):
+            #         if tuple(_v1.shape) != tuple(_v2.shape) or _v1.dtype != _v2.dtype:
+            #             print(
+            #                 f"[batch-vs-batch2] {_k}: shape/dtype mismatch "
+            #                 f"{tuple(_v1.shape)}/{_v1.dtype} vs {tuple(_v2.shape)}/{_v2.dtype}"
+            #             )
+            #             _mm += 1
+            #             continue
+            #         if torch.is_floating_point(_v1):
+            #             _a = _v1.detach().float().cpu()
+            #             _b = _v2.detach().float().cpu()
+            #             if not torch.allclose(_a, _b, rtol=1e-6, atol=1e-6):
+            #                 _d = (_a - _b).abs()
+            #                 print(
+            #                     f"[batch-vs-batch2] {_k}: max_abs={float(_d.max().item()):.6e}, "
+            #                     f"mean_abs={float(_d.mean().item()):.6e}"
+            #                 )
+            #                 _mm += 1
+            #         else:
+            #             if not torch.equal(_v1.detach().cpu(), _v2.detach().cpu()):
+            #                 print(f"[batch-vs-batch2] {_k}: not equal")
+            #                 _mm += 1
+            #     else:
+            #         if _v1 != _v2:
+            #             print(f"[batch-vs-batch2] {_k}: not equal")
+            #             _mm += 1
+            # if _mm == 0:
+            #     print("[batch-vs-batch2] all equal")
 
-                    input_data = {
-                        'rgbmB': input_rgbms[fi].cpu().numpy().astype(np.uint8).copy(),
-                        'xyzB': input_xyzs[fi].cpu().numpy().astype(np.float16).copy()
-                    }
-                    render_data = {
-                        'rgba': rgbs[0].copy(),
-                        'depth': dmaps[0].astype(np.float16).copy(),
-                        'K_roi': K_rois[fi],
-                        'bbox': bboxes[fi],
-                        'mask_o': np.stack([mask_rend_o, mask_o_full], -1).copy(),
-                    }
-                    rgb_render = render_data['rgba']
-                    if vis_input:
-                        vis = np.concatenate([input_data['rgbmB'][:, :, :3], render_data['rgba'][:, :, :3], 
-                        cv2.addWeighted(input_data['rgbmB'][:, :, :3], 0.5, render_data['rgba'][:, :, :3], 0.5, 0)], 1)
-                        vw_input.append_data(vis) # rendering is correct 
+            mb0 = collated_batch_item_for_delta_gt(batch, bid=0)
+            trans_delta_gt2 = normalized_trans_delta_gt_from_batch(mb0, cfg)
 
-                    dmap_xyz, dmap_xyz_a, rgb = trainer.dataset_test.process_input(dmap_xyz_init.clone(), fi,
-                                                                                   input_data, mesh_diameter, trans_nlf,
-                                                                                   poses_perturbed[fi], render_data,
-                                                                                   render_data['rgba'], frames_used[-1],
-                                                                                   kid)
-                    render_rgbs.append(rgb_render.copy().transpose(2, 0, 1) / 255.)
-                    render_xyz.append(dmap_xyz_a)
-                    input_xyz_final.append(dmap_xyz)
-                    input_rgbs_final.append(rgb)
-
-                # step 5: organize data into a batch (single item)
-                poseA_norm = B_in_cams.copy()
-                poseA_norm[:, :3, 3] *= 2 / mesh_diameter
-
-                mesh_diam_tensor = \
-                torch.as_tensor([mesh_diameter] * len(poses_perturbed), device=device, dtype=torch.float)[None]
-                trans_norm = torch.as_tensor(np.array(args.trans_normalizer), device=device, dtype=torch.float).repeat(
-                    len(poses_perturbed), 1)[None]
-
-                obj_name = seq_name.split('_')[2]
-                batch = {
-                    **prep, # this contains human pose information
-                    "input_rgbs": torch.stack(input_rgbs_final, 0).cuda().float()[None],  # this is rgbB
-                    'render_rgbs': torch.from_numpy(np.stack(render_rgbs, axis=0)).cuda().float()[None],
-                    # this is rgbAs
-                    'input_xyz': torch.stack(input_xyz_final, 0).float().cuda()[None],
-                    'render_xyz': torch.stack(render_xyz, 0).float().cuda()[None],
-                    'mesh_diameter': mesh_diam_tensor,  # not exactly right
-                    'trans_normalizer': trans_norm.reshape(1, len(poses_perturbed), 3),
-                    'poseA_norm': torch.from_numpy(poseA_norm).float().cuda()[None],
-                    'pose_perturbed': torch.from_numpy(B_in_cams)[None].float().cuda(),
-                    # matches
-
-                    # dummy data
-                    'delta_transl': torch.zeros((1, len(poses_perturbed), 3), device=device),
-                    'delta_rot': torch.zeros((1, len(poses_perturbed), 3, 3), device=device),
-
-                    'K_rois': torch.from_numpy(np.stack(K_rois)).float().cuda()[None],  # match
-
-                    'smpl_poses_gt': torch.from_numpy(poses_full).float().cuda()[None],
-                    # this does not align with dataloader one
-                    'smpl_transl_gt': torch.from_numpy(packed['trans'][start:end]).float().cuda()[None],  # match
-                    'betas_gt': torch.from_numpy(betas_gt).float().cuda()[None],
-                }
-
-                # Compute GT object pose in camera coordinates (B, T, 4, 4)
-                # We already have R_cam and t_cam below when preparing GT rendering. Reuse packed loaded above.
-                angles_gt = packed['obj_angles'][start:end].astype(np.float32)
-                transl_gt = packed['obj_trans'][start:end].astype(np.float32)
-                R_wc = torch.from_numpy(w2c_rots[enum_idx]).to(device).float()
-                t_wc = torch.from_numpy(w2c_trans[enum_idx]).to(device).float()
-                R_obj = torch.from_numpy(R.from_rotvec(angles_gt).as_matrix()).to(device).float()  # (T, 3, 3)
-                t_world = torch.from_numpy(transl_gt).to(device).float()  # (T, 3)
-                R_cam = torch.matmul(R_wc[None].expand(end - start, -1, -1), R_obj)  # (T, 3, 3)
-                t_cam = torch.matmul(t_world, R_wc.T) + t_wc  # (T, 3)
-                pose_gt_mat = torch.eye(4, device=device, dtype=torch.float)[None].repeat(end - start, 1, 1)
-                pose_gt_mat[:, :3, :3] = R_cam
-                pose_gt_mat[:, :3, 3] = t_cam
-                batch['pose_gt'] = pose_gt_mat[None].clone()  # (B, T, 4, 4)
-
-                poseA = batch['pose_perturbed']
-                poseB = batch['pose_gt']
-                # compute real delta
-                batch['delta_transl'] = poseB[:, :, :3, 3] - poseA[:, :, :3, 3]
-                batch['delta_rot'] = torch.matmul(poseB[:, :, :3, :3], poseA[:, :, :3, :3].permute(0, 1, 3, 2))
-
-                # Second path: same batch construction as above, implemented in ``video_data_vis`` (forked mp4 reader).
-                batch2 = vis_batch_loader.getitem(start, end, B_in_cams_override=B_in_cams if it else None, prep_override=prep if it else None, verts_hum_override=verts_nlf_render if it else None)
-
-                trans_delta_gt2 = normalized_trans_delta_gt_from_batch(batch, cfg)
-
-                mb0 = collated_batch_item_for_delta_gt(batch2, bid=0)
-                trans_delta_gt_vis = normalized_trans_delta_gt_from_batch(mb0, cfg)
-                if trans_delta_gt_vis.shape == trans_delta_gt2.shape:
-                    dmax = float((trans_delta_gt2 - trans_delta_gt_vis).abs().max().item())
-                    delta_gt_metric_vs_render_max_abs.append(dmax)
-                    if start == 0:
-                        diagnose_trans_delta_gt_batch_diff(batch, mb0, cfg)
-                else:
-                    print(
-                        f"[run_1seq] normalized delta_transl shape mismatch: "
-                        f"render {tuple(trans_delta_gt2.shape)} vs vis batch[0] {tuple(trans_delta_gt_vis.shape)} "
-                        f"(often different clip_len / frame window)"
-                    )
-
-                import pdb; pdb.set_trace() # do not remove !!!(for debugging)
-
-                rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = trainer.forward_batch(batch, cfg,
-                                                                                                    trainer.model,
-                                                                                                    ret_dict=True,
-                                                                                                    vis=False)
-                # Record comparison metrics/fingerprints INSIDE run_1seq.
-                fm = batch.get('frame_mask', None)
-                if fm is None:
-                    bs, ts = batch['pose_perturbed'].shape[:2]
-                    fm = torch.ones((bs, ts), device=trans_delta_pred.device, dtype=trans_delta_pred.dtype)
-                fm = fm.unsqueeze(-1)
-                bs, ts = fm.shape[:2]
-                loss_t_eval_vals.append(
-                    float((torch.abs(trans_delta_pred - trans_delta_gt).reshape(bs, ts, -1) * fm).mean().item())
+            # import pdb; pdb.set_trace() # do not remove !!!(for debugging)
+            rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = trainer.forward_batch(batch, cfg,
+                                                                                                trainer.model,
+                                                                                                ret_dict=True,
+                                                                                                vis=False)
+            # Record comparison metrics/fingerprints INSIDE run_1seq.
+            fm = batch.get('frame_mask', None)
+            if fm is None:
+                bs, ts = batch['pose_perturbed'].shape[:2]
+                fm = torch.ones((bs, ts), device=trans_delta_pred.device, dtype=trans_delta_pred.dtype)
+            fm = fm.unsqueeze(-1)
+            bs, ts = fm.shape[:2]
+            loss_t_eval_vals.append(
+                float((torch.abs(trans_delta_pred - trans_delta_gt).reshape(bs, ts, -1) * fm).mean().item())
+            )
+            loss_t_eval_vals2.append(
+                float((torch.abs(trans_delta_pred - trans_delta_gt2).reshape(bs, ts, -1) * fm).mean().item())
+            )
+            loss_func_v = F.l1_loss if 'l1' in str(cfg.loss_type) else F.mse_loss
+            loss_r_eval_vals.append(
+                float(
+                    (
+                        loss_func_v(rot, rot_delta_gt, reduction='none').reshape(bs, ts, -1) * fm
+                    ).mean().item() * float(getattr(cfg, "w_rot", 1.0))
                 )
-                loss_t_eval_vals2.append(
-                    float((torch.abs(trans_delta_pred - trans_delta_gt2).reshape(bs, ts, -1) * fm).mean().item())
-                )
-                loss_func_v = F.l1_loss if 'l1' in str(cfg.loss_type) else F.mse_loss
-                loss_r_eval_vals.append(
+            )
+            if ("hum_pose" in output) and ("delta_smpl_rot" in batch):
+                gt_delta_r = batch["delta_smpl_rot"][:, :, :, :, :2].reshape(-1, 24 * 6)
+                hum_pose = output["hum_pose"]
+                loss_hum_r_vals.append(
                     float(
                         (
-                            loss_func_v(rot, rot_delta_gt, reduction='none').reshape(bs, ts, -1) * fm
-                        ).mean().item() * float(getattr(cfg, "w_rot", 1.0))
+                            loss_func_v(hum_pose, gt_delta_r, reduction='none').reshape(bs, ts, -1) * fm
+                        ).mean().item() * float(getattr(cfg, "w_hum_rot", 1.0))
                     )
                 )
-                if ("hum_pose" in output) and ("delta_smpl_rot" in batch):
-                    gt_delta_r = batch["delta_smpl_rot"][:, :, :, :, :2].reshape(-1, 24 * 6)
-                    hum_pose = output["hum_pose"]
-                    loss_hum_r_vals.append(
-                        float(
-                            (
-                                loss_func_v(hum_pose, gt_delta_r, reduction='none').reshape(bs, ts, -1) * fm
-                            ).mean().item() * float(getattr(cfg, "w_hum_rot", 1.0))
-                        )
-                    )
-                if hasattr(trainer, "coconet_gt_fingerprint"):
-                    gt_fps.append(trainer.coconet_gt_fingerprint(batch))
-                if hasattr(trainer, "coconet_model_input_fingerprint"):
-                    input_fps.append(trainer.coconet_model_input_fingerprint(batch))
-                if hasattr(trainer, "coconet_model_input_fingerprint_parts"):
-                    input_parts.append(trainer.coconet_model_input_fingerprint_parts(batch))
+            if hasattr(trainer, "coconet_gt_fingerprint"):
+                gt_fps.append(trainer.coconet_gt_fingerprint(batch))
+            if hasattr(trainer, "coconet_model_input_fingerprint"):
+                input_fps.append(trainer.coconet_model_input_fingerprint(batch))
+            if hasattr(trainer, "coconet_model_input_fingerprint_parts"):
+                input_parts.append(trainer.coconet_model_input_fingerprint_parts(batch))
 
-                # update object pose
-                prep = {}
-                B_in_cams, _ = trainer.compute_abspose(poseA.shape[0], batch, cfg, poseA, rot,
-                                                       rot_delta_gt,
-                                                       trans_delta_gt, trans_delta_pred, output)
-                if cfg.use_intermediate:
-                    B_in_cams = trainer.abspose_from_relative(batch, cfg, poseA, rot, trans_delta_pred)
+            # update object pose
+            prep = {}
+            B_in_cams, _ = trainer.compute_abspose(poseA.shape[0], batch, cfg, poseA, rot,
+                                                    rot_delta_gt,
+                                                    trans_delta_gt, trans_delta_pred, output)
+            if cfg.use_intermediate:
+                B_in_cams = trainer.abspose_from_relative(batch, cfg, poseA, rot, trans_delta_pred)
 
-                #### Start of update SMPL pose
-                betas, pred_smpl_pose, pred_smpl_r, pred_smpl_t = trainer.smpl_params_from_pred(batch, output)
-                pred_smpl_pose = pose72to156(pred_smpl_pose)
-                # still use the old NLF translation
+            #### Start of update SMPL pose
+            betas, pred_smpl_pose, pred_smpl_r, pred_smpl_t = trainer.smpl_params_from_pred(batch, output)
+            pred_smpl_pose = pose72to156(pred_smpl_pose)
+            # still use the old NLF translation
 
-                verts_nlf_render = body_model(pred_smpl_pose,  # match
-                                              torch.from_numpy(betas_gt).to(device),  # match
-                                              torch.from_numpy(trans_nlf_init).float().to(device)
-                                              )[0].cpu().numpy()
-                prep['nlf_transl'] = torch.from_numpy(trans_nlf_init).float().to(device)[None].to(device).float()  # matches
+            verts_nlf_render = body_model(pred_smpl_pose,  # match
+                                            torch.from_numpy(betas_gt).to(device),  # match
+                                            torch.from_numpy(trans_nlf_init).float().to(device)
+                                            )[0].cpu().numpy()
+            prep['nlf_transl'] = torch.from_numpy(trans_nlf_init).float().to(device)[None].to(device).float()  # matches
 
-                # joints from landmarks
-                joints_nlf_np = landmark.get_body_kpts_batch(verts_nlf_render)  # (T, 25, 3)
-                prep['joints_nlf'] = torch.from_numpy(joints_nlf_np)[None].to(device).float()
-                # rotation matrices per joint
-                poses_nlf = pred_smpl_pose.cpu().numpy()  # (T, 72)
-                nlf_rot_np = R.from_rotvec(poses_nlf.reshape(-1, 3)).as_matrix().astype(np.float32).reshape(-1, 52, 3, 3)[:, :24]# prediction has only 24 joints 
-                prep['nlf_rotmat'] = torch.from_numpy(nlf_rot_np).to(device).float()  # (BT, J, 3, 3)
+            # joints from landmarks
+            joints_nlf_np = landmark.get_body_kpts_batch(verts_nlf_render)  # (T, 25, 3)
+            prep['joints_nlf'] = torch.from_numpy(joints_nlf_np)[None].to(device).float()
+            # rotation matrices per joint
+            poses_nlf = pred_smpl_pose.cpu().numpy()  # (T, 72)
+            nlf_rot_np = R.from_rotvec(poses_nlf.reshape(-1, 3)).as_matrix().astype(np.float32).reshape(-1, 52, 3, 3)[:, :24]# prediction has only 24 joints 
+            prep['nlf_rotmat'] = torch.from_numpy(nlf_rot_np).to(device).float()  # (BT, J, 3, 3)
 
-                prep['betas_gt'] = torch.from_numpy(betas_gt)[None].to(device).float()
-                poses_nlf, trans_nlf = poses_nlf, prep['nlf_transl'].cpu().numpy()[0]  # TODO: update betas if needed
-                #### End of update SMPL pose
+            prep['betas_gt'] = torch.from_numpy(betas_gt)[None].to(device).float()
+            poses_nlf, trans_nlf = poses_nlf, prep['nlf_transl'].cpu().numpy()[0]  # TODO: update betas if needed
+            #### End of update SMPL pose
 
-                # Re-init batch
-                print(f'iteration {it} done')
             # step 7: visualize predictions by rendering SMPL + object in batch (similar to tools/viz_pred.py)
 
             K = self.K_full.copy()
