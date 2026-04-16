@@ -38,7 +38,7 @@ from behave_data.behave_video import load_masks
 from prep.render_fp_nlf import BehaveFPNLFRenderer
 from tools.eval_base import ModelEvaluator
 from learning.training.trainer import Trainer
-from learning.datasets.video_data_vis import HoRefineVisBatchLoader
+from learning.datasets.video_data_vis import HoRefineVisBatchLoader, finalize_horefine_vis_ctx
 from lib_smpl import pose156to72, pose72to156, SMPL_ASSETS_ROOT
 import h5py
 
@@ -274,8 +274,20 @@ class HORefineRunner(BehaveFPNLFRenderer):
             print(f'{pth_file} already exists, skipping')
             return
 
-        # HERE
-
+        # HERE — rest of ctx is resolved lazily in ``learning/datasets/video_data_vis.py`` (run_1seq stack).
+        horefine_vis_ctx = SimpleNamespace(
+            runner=self,
+            trainer=trainer,
+            args=args,
+            cfg=cfg,
+            device=device,
+            seq_name=seq_name,
+            video_prefix=video_prefix,
+        )
+        vis_batch_loader = HoRefineVisBatchLoader(
+            batch_size=int(getattr(cfg, "vis_compare_batch_size", getattr(cfg, "batch_size", 1))),
+            ctx=horefine_vis_ctx,
+        )
 
         fp_root = cfg.fp_root
         fp_data = joblib.load(osp.join(fp_root, f'{seq_name}_all.pkl'))
@@ -395,44 +407,44 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 tar_mask_independent = MP4MaskLoader(
                     _mh.strip(), _mo.strip(), fps=float(getattr(args, "fps", 30))
                 )
-        horefine_vis_ctx = SimpleNamespace(
-            runner=self,
-            trainer=trainer,
-            args=args,
-            cfg=cfg,
-            device=device,
-            seq_name=seq_name,
-            video_prefix=video_prefix,
-            kid=kid,
-            enum_idx=enum_idx,
-            kids=kids,
-            packed=packed,
-            nlf_data=nlf_data,
-            fp_poses=fp_poses,
-            fp_frames=fp_frames,
-            frames_packed=frames_packed,
-            mesh_tensors=mesh_tensors,
-            mesh_tensors_obj=mesh_tensors_obj,
-            glctx=glctx,
-            render_size=render_size,
-            verts_obj_base=verts_obj_base,
-            gt_to_perturb_pose=gt_to_perturb_pose,
-            controllers=controllers,
-            tar_mask=tar_mask,
-            tar_mask_independent=tar_mask_independent,
-            body_model=body_model,
-            landmark=landmark,
-            mesh_diameter=mesh_diameter,
-            w2c_rots=w2c_rots,
-            w2c_trans=w2c_trans,
-            vis_input=vis_input,
-            vw_input=vw_input,
-            record_independent_vis=False,
-        )
-        vis_batch_loader = HoRefineVisBatchLoader(
-            batch_size=int(getattr(cfg, "vis_compare_batch_size", getattr(cfg, "batch_size", 1))),
-            ctx=horefine_vis_ctx,
-        )
+        # horefine_vis_ctx = SimpleNamespace(
+        #     runner=self,
+        #     trainer=trainer,
+        #     args=args,
+        #     cfg=cfg,
+        #     device=device,
+        #     seq_name=seq_name,
+        #     video_prefix=video_prefix,
+        #     kid=kid,
+        #     enum_idx=enum_idx,
+        #     kids=kids,
+        #     packed=packed,
+        #     nlf_data=nlf_data,
+        #     fp_poses=fp_poses,
+        #     fp_frames=fp_frames,
+        #     frames_packed=frames_packed,
+        #     mesh_tensors=mesh_tensors,
+        #     mesh_tensors_obj=mesh_tensors_obj,
+        #     glctx=glctx,
+        #     render_size=render_size,
+        #     verts_obj_base=verts_obj_base,
+        #     gt_to_perturb_pose=gt_to_perturb_pose,
+        #     controllers=controllers,
+        #     tar_mask=tar_mask,
+        #     tar_mask_independent=tar_mask_independent,
+        #     body_model=body_model,
+        #     landmark=landmark,
+        #     mesh_diameter=mesh_diameter,
+        #     w2c_rots=w2c_rots,
+        #     w2c_trans=w2c_trans,
+        #     vis_input=vis_input,
+        #     vw_input=vw_input,
+        #     record_independent_vis=False,
+        # )
+        # vis_batch_loader = HoRefineVisBatchLoader(
+        #     batch_size=int(getattr(cfg, "vis_compare_batch_size", getattr(cfg, "batch_size", 1))),
+        #     ctx=horefine_vis_ctx,
+        # )
 
 
         iou_debug_saved = False

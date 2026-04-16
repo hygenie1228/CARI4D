@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import os.path as osp
 from typing import Any, Optional
 
 import cv2
+import joblib
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
@@ -14,6 +17,152 @@ import Utils
 from behave_data.behave_video import load_masks
 from behave_data.utils import init_video_controllers
 from tools import img_utils
+from Utils import load_smpl_obj_uvmap
+from lib_smpl import SMPL_ASSETS_ROOT, get_smpl
+from lib_smpl.body_landmark import BodyLandmarks
+from behave_data.const import _sub_gender
+
+
+def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
+    """Mirror ``HORefineRunner.run_1seq`` setup (fp, meshes, masks, NLF, packed, body, landmark, mp4 fork).
+
+    Mutates ``partial`` in place (same object as the early ``horefine_vis_ctx`` in ``run_horefine``).
+    """
+    import nvdiffrast.torch as dr
+
+    import run_horefine as rh
+
+    runner = partial.runner
+    args = partial.args
+    cfg = partial.cfg
+    device = partial.device
+    seq_name = partial.seq_name
+    video_prefix = partial.video_prefix
+
+    fp_root = cfg.fp_root
+    fp_data = joblib.load(osp.join(fp_root, f"{seq_name}_all.pkl"))
+    fp_poses = fp_data["fp_poses"]
+    fp_frames = fp_data["frames"]
+    kids = [cfg.cam_id]
+    w2c_rots = [np.eye(3) for _ in kids]
+    w2c_trans = [np.zeros(3) for _ in kids]
+    mesh_tensors, meshes = load_smpl_obj_uvmap(seq_name, use_hy3d=True, meshes_root=cfg.hy3d_meshes_root)
+    meshes_any: Any = meshes
+    glctx = dr.RasterizeCudaContext()
+    render_size = (args.rend_size, args.rend_size)
+    obj_idx = 1
+    verts_obj_base_t = meshes_any[obj_idx].verts_padded()[0].to(device).float()
+    tex = meshes[obj_idx].textures
+    uv = tex.verts_uvs_padded()[0]
+    uv[:, 1] = 1 - uv[:, 1]
+    mesh_tensors_obj = {
+        "tex": tex.maps_padded().to(device).float(),
+        "uv_idx": torch.tensor(tex.faces_uvs_padded()[0], device=device, dtype=torch.int),
+        "uv": uv.to(device).float(),
+        "pos": meshes[obj_idx].verts_padded()[0].to(device).float(),
+        "faces": torch.tensor(meshes[obj_idx].faces_padded()[0], device=device, dtype=torch.int),
+        "vnormals": meshes[obj_idx].verts_normals_padded()[0].to(device).float(),
+    }
+    controllers, tar_mask = runner.prepare_video_mask_loader(args, kids, video_prefix, cfg)
+    gt_to_perturb_pose = np.eye(4)
+    if not cfg.wild_video:
+        center = np.zeros(3)
+    else:
+        center = np.mean(verts_obj_base_t.detach().cpu().numpy(), axis=0)
+    print("Using center: ", center)
+    gt_to_perturb_pose[:3, 3] = center
+    verts_obj_base = verts_obj_base_t.detach().cpu().numpy() - center
+    enum_idx, kid = 0, cfg.cam_id
+    nlf_data = joblib.load(f"{cfg.nlf_root}/{video_prefix}_params.pkl")
+
+    packed = None
+    packed_root = getattr(cfg, "packed_root", None)
+    if packed_root:
+        packed_file = osp.join(packed_root, f"{seq_name}_GT-packed.pkl")
+        if osp.isfile(packed_file):
+            packed = joblib.load(packed_file)
+            print(f"loaded GT packed labels from {packed_file}")
+    if packed is None:
+        packed = {}
+        packed["obj_angles"] = R.from_matrix(fp_poses[:, enum_idx, :3, :3]).as_rotvec().astype(np.float32)
+        packed["obj_trans"] = fp_poses[:, enum_idx, :3, 3].astype(np.float32)
+        packed["poses"] = nlf_data["poses"][:, 0].copy()
+        packed["betas"] = nlf_data["betas"][:, 0].copy()
+        packed["trans"] = nlf_data["transls"][:, 0].copy()
+        packed["frames"] = fp_frames
+
+    frames_packed = packed["frames"]
+    frames_packed = [x for x in frames_packed if x in nlf_data["frames"]]
+    body_model = get_smpl(_sub_gender[video_prefix.split("_")[1]], hands=True).to(device)
+    betas_avg = np.mean(packed["betas"].reshape((-1, 10)), 0)
+    mesh_diameter = runner.get_smpl_diameter(betas_avg, body_model)
+
+    out_root = cfg.video_out
+    os.makedirs(out_root, exist_ok=True)
+    landmark = BodyLandmarks(SMPL_ASSETS_ROOT)
+
+    vis_input = True
+    if vis_input:
+        # Input overlay path matches ``run_1seq``; do not ``imageio.get_writer`` here — the main loop
+        # already holds ``vw_input`` for that path. Set ``partial.vw_input`` yourself if you need vis-batch appends.
+        vw_input = getattr(partial, "vw_input", None)
+    else:
+        vw_input = None
+
+    tar_mask_independent = tar_mask
+    _masks_root_vis = str(getattr(cfg, "masks_root", ""))
+    if "," in _masks_root_vis:
+        _mh, _mo = _masks_root_vis.split(",", 1)
+        if _mh.strip().lower().endswith(".mp4") and _mo.strip().lower().endswith(".mp4"):
+            tar_mask_independent = rh.MP4MaskLoader(
+                _mh.strip(), _mo.strip(), fps=float(getattr(args, "fps", 30))
+            )
+
+    partial.kid = kid
+    partial.enum_idx = enum_idx
+    partial.kids = kids
+    partial.packed = packed
+    partial.nlf_data = nlf_data
+    partial.fp_poses = fp_poses
+    partial.fp_frames = fp_frames
+    partial.frames_packed = frames_packed
+    partial.mesh_tensors = mesh_tensors
+    partial.mesh_tensors_obj = mesh_tensors_obj
+    partial.glctx = glctx
+    partial.render_size = render_size
+    partial.verts_obj_base = verts_obj_base
+    partial.gt_to_perturb_pose = gt_to_perturb_pose
+    partial.controllers = controllers
+    partial.tar_mask = tar_mask
+    partial.tar_mask_independent = tar_mask_independent
+    partial.body_model = body_model
+    partial.landmark = landmark
+    partial.mesh_diameter = mesh_diameter
+    partial.w2c_rots = w2c_rots
+    partial.w2c_trans = w2c_trans
+    partial.vis_input = vis_input
+    partial.vw_input = vw_input
+    if not hasattr(partial, "record_independent_vis"):
+        partial.record_independent_vis = False
+
+
+def hydrate_horefine_vis_ctx(partial: Any) -> Any:
+    """If ``partial`` has no ``packed`` yet, run the same init as ``run_horefine.run_1seq`` (fp→masks→NLF…)."""
+    if getattr(partial, "packed", None) is not None:
+        return partial
+    _materialize_horefine_vis_ctx_from_partial(partial)
+    return partial
+
+
+def finalize_horefine_vis_ctx(ctx: Any) -> None:
+    """Register ``ctx`` in ``ctx._vis_ctx_ref`` so :class:`HoRefineVisBatchLoader` can bind lazily.
+
+    Use when the loader is constructed with ``ctx_ref=`` **before** ``ctx`` exists, or whenever
+    you replace the namespace: call after ``horefine_vis_ctx = SimpleNamespace(..., _vis_ctx_ref=ref)``.
+    """
+    ref = getattr(ctx, "_vis_ctx_ref", None)
+    if ref is not None:
+        ref["ctx"] = ctx
 
 
 def horefine_vis_window_build_prep_and_smpl_init(
@@ -178,12 +327,13 @@ def horefine_vis_window_render_and_make_batch(
         mesh_tensors["pos"] = torch.from_numpy(np.concatenate([vh, vo], 0)).float().cuda()
         mesh_tensors_obj["pos"] = torch.from_numpy(vo).float().cuda()
         bbox2d_ori = torch.tensor([[0, 0.0, render_size[0], render_size[1]]], device=device).repeat(1, 1)
+        ob_in_cam_eye = torch.as_tensor(np.eye(4)[None], device=device, dtype=torch.float)
         extra: dict = {}
         rgb_r, depth_r, _ = Utils.nvdiffrast_render(
             K=np.stack([K_rois[fi]], 0),
             H=render_size[1],
             W=render_size[0],
-            ob_in_cams=torch.as_tensor(np.eye(4)[None]).float(),
+            ob_in_cams=ob_in_cam_eye,
             context="cuda",
             get_normal=False,
             glctx=glctx,
@@ -197,7 +347,7 @@ def horefine_vis_window_render_and_make_batch(
             K=np.stack([K_rois[fi]], 0),
             H=render_size[1],
             W=render_size[0],
-            ob_in_cams=torch.as_tensor(np.eye(4)[None]).float(),
+            ob_in_cams=ob_in_cam_eye,
             context="cuda",
             get_normal=False,
             glctx=glctx,
@@ -452,17 +602,42 @@ def horefine_vis_rebuild_independent_window_batch(
 
 
 class HoRefineVisBatchLoader:
-    """Stack identical window dicts (``batch_size``) and rebuild windows from ``ctx`` (no read from main ``batch``)."""
+    """Stack identical window dicts (``batch_size``) and rebuild windows from ``ctx`` (no read from main ``batch``).
 
-    def __init__(self, batch_size: int = 1, *, ctx: Optional[Any] = None) -> None:
+    Pass **either** ``ctx=`` **or** ``ctx_ref=`` (mutable ``dict``). With ``ctx_ref``, insert the final namespace
+    with ``finalize_horefine_vis_ctx(ctx)`` after building it — allows constructing this loader before ``ctx`` exists.
+    """
+
+    def __init__(
+        self,
+        batch_size: int = 1,
+        *,
+        ctx: Optional[Any] = None,
+        ctx_ref: Optional[dict] = None,
+    ) -> None:
+        if (ctx is None) == (ctx_ref is None):
+            raise ValueError("HoRefineVisBatchLoader: pass exactly one of ctx= or ctx_ref=")
         self.batch_size = max(1, int(batch_size))
         self._vis_ctx = ctx
+        self._ctx_ref = ctx_ref
         self._start: Optional[int] = None
         self._end: Optional[int] = None
         self._B_override: Optional[np.ndarray] = None
         self._prep_override: Optional[dict] = None
         self._verts_override: Optional[np.ndarray] = None
         self._spent = False
+
+    def _resolve_ctx(self) -> Any:
+        if self._ctx_ref is not None:
+            c = self._ctx_ref.get("ctx")
+            if c is None:
+                raise RuntimeError(
+                    "HoRefineVisBatchLoader: ctx_ref has no 'ctx' yet; call finalize_horefine_vis_ctx(horefine_vis_ctx)"
+                )
+            return hydrate_horefine_vis_ctx(c)
+        if self._vis_ctx is None:
+            raise RuntimeError("HoRefineVisBatchLoader: missing ctx")
+        return hydrate_horefine_vis_ctx(self._vis_ctx)
 
     def stack_identical_copies(self, window: dict) -> dict:
         B = self.batch_size
@@ -524,11 +699,10 @@ class HoRefineVisBatchLoader:
         prep_override: Optional[dict] = None,
         verts_hum_override: Optional[np.ndarray] = None,
     ) -> dict:
-        if self._vis_ctx is None:
-            raise RuntimeError("HoRefineVisBatchLoader.getitem requires ctx=... at construction")
+        _ctx = self._resolve_ctx()
         single = horefine_vis_rebuild_independent_window_batch(
-            self._vis_ctx.runner,
-            self._vis_ctx,
+            _ctx.runner,
+            _ctx,
             start,
             end,
             B_in_cams_override=B_in_cams_override,
