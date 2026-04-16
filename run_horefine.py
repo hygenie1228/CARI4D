@@ -383,12 +383,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
         # Max |normalized delta_transl (render batch) - (metric/train batch)| per window when shapes match.
         delta_gt_metric_vs_render_max_abs: list[float] = []
 
-        vis_input = False
-        if vis_input:
-            out_path = osp.join(out_root, f'{save_name}+{seq_name}_it{cfg.refine_iters}_input.mp4')
-            vw_input = imageio.get_writer(out_path, fps=15)
-        else:
-            vw_input = None
         # Second reader for ``video_data_vis`` batch2: mp4 masks are sequential; main loop advances ``tar_mask``.
         tar_mask_independent = tar_mask
         _masks_root_vis = str(getattr(cfg, "masks_root", ""))
@@ -409,7 +403,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 cfg.clip_len = clip_len
                 cfg.window = clip_len
             clip_len = end - start  # actual clip length
-            pose_init_list, poseA_norm_list, K_rois, frames_used = [], [], [], []
+            # pose_init_list, poseA_norm_list are no longer used.
+            K_rois, frames_used = [], []
             poses_perturbed = []
             full_colors = []  # store original RGB frames to reuse in visualization
 
@@ -429,81 +424,15 @@ class HORefineRunner(BehaveFPNLFRenderer):
                                                torch.from_numpy(betas_gt).to(device),  # match
                                                torch.from_numpy(trans_nlf_init).to(device))[0].cpu().numpy()
 
-            # joints from landmarks
-            joints_nlf_np = landmark.get_body_kpts_batch(verts_nlf_render_init)  # (T, 25, 3)
-            prep['joints_nlf'] = torch.from_numpy(joints_nlf_np)[None].to(device).float()
-            # rotation matrices per joint
-            NJ = 52
-            nlf_rot_np_init = R.from_rotvec(poses_nlf_init.reshape(-1, 3)).as_matrix().astype(np.float32).reshape(-1,
-                                                                                                                  NJ, 3,
-                                                                                                                  3)
-            prep['nlf_rotmat'] = torch.from_numpy(nlf_rot_np_init).to(device).float()[:, :24]  # (BT, J, 3, 3)
-            prep['nlf_transl'] = torch.from_numpy(trans_nlf_init)[None].to(device).float()  # matches
-            prep['betas_gt'] = torch.from_numpy(betas_gt)[None].to(device).float()
-            prep['betas_nlf'] = torch.from_numpy(betas_avg)[None].to(device).float()
-            prep['nlf_poses'] = torch.from_numpy(poses_nlf_init).to(device).float()
-
-            # Load RGB and masks
-            input_rgbms, input_xyzs, bboxes = [], [], []
-            for i in tqdm(range(start, end)):
-                frame_time = frames_packed[i]
-                if frame_time not in fp_frames:
-                    print(f'Frame {frame_time} not found in FP frames!')
-                    continue
-                idx_fp = fp_frames.index(frame_time)
-                frames_used.append(f'{seq_name}/{frame_time}')
-                pose_fp = np.matmul(fp_poses[idx_fp, enum_idx], gt_to_perturb_pose)
-
-                if isinstance(tar_mask, MP4MaskLoader):
-                    mask_h, mask_o = tar_mask.get_masks(frame_time)
-                else:
-                    mask_h, mask_o = load_masks(video_prefix, frame_time, kid, tar_mask)
-                if mask_h is None:
-                    continue
-
-                # compute crop params from mask
-                bmin, bmax = img_utils.masks2bbox([mask_h, mask_o])
-                center_2d = (bmax + bmin) / 2
-                radius = np.max(bmax - bmin) * 1.1 / 2
-                top_left = center_2d - radius
-                bottom_right = center_2d + radius
-                K_roi = self.Kroi_from_corners(bottom_right, top_left) # TODO: reload this each time when new video seq come in, especially for wild video!  
-
-                # Load RGB and depth for input
-                t2 = time.time()
-                t = float(frame_time[1:])
-                actual_times = np.array([controllers[x].get_closest_time(t) for x, _ in enumerate(kids)])
-                best_kid = np.argmin(np.abs(actual_times - t))
-                actual_time = actual_times[best_kid]
-                color, depth = controllers[enum_idx].get_closest_frame(actual_time)
-                H_full, W_full = color.shape[:2]
-                t3 = time.time()
-                full_colors.append(np.asarray(color))
-                # ensure proper stacking with correct dtype
-                color_np = np.asarray(color, dtype=np.uint8)
-                mask_h_np = mask_h.astype(np.uint8)
-                mask_o_np = mask_o.astype(np.uint8)
-                color = np.concatenate([color_np, mask_h_np[:, :, None], mask_o_np[:, :, None]], axis=-1)
-                bbox = np.hstack((top_left.astype(np.float32), bottom_right.astype(np.float32)))
-                dmap_xyz, rgbm = self.crop_color_dmap(bbox, color, depth, render_size)  # (H, W, 3), (H, W, 5)
-
-                input_rgbms.append(rgbm)
-                input_xyzs.append(dmap_xyz)
-                K_rois.append(K_roi)
-                poses_perturbed.append(pose_fp.copy())
-                bboxes.append(bbox)
-
-            # Initialization
-            B_in_cams_init = np.stack(poses_perturbed, axis=0).copy()
-            B_in_cams = torch.from_numpy(np.stack(poses_perturbed, axis=0).copy()).to(device).float()[None]
-            verts_nlf_render = verts_nlf_render_init
-            poses_nlf, betas_nlf, trans_nlf = poses_nlf_init, betas_gt, trans_nlf_init
-
 
             batch = vis_batch_loader.getitem(start, end)
+            B_in_cams_init = batch['B_in_cams_init']
+            H_full, W_full = batch["full_hw"]
+            frames_used = batch["frames_used"]
+            full_colors = batch["full_colors"]
+            K_rois = batch['K_rois']
 
             # Compute GT object pose in camera coordinates (B, T, 4, 4)
-            # We already have R_cam and t_cam below when preparing GT rendering. Reuse packed loaded above.
             angles_gt = packed['obj_angles'][start:end].astype(np.float32)
             transl_gt = packed['obj_trans'][start:end].astype(np.float32)
             R_wc = torch.from_numpy(w2c_rots[enum_idx]).to(device).float()
@@ -519,53 +448,10 @@ class HORefineRunner(BehaveFPNLFRenderer):
 
             poseA = batch['pose_perturbed']
             poseB = batch['pose_gt']
+
             # compute real delta
             batch['delta_transl'] = poseB[:, :, :3, 3] - poseA[:, :, :3, 3]
             batch['delta_rot'] = torch.matmul(poseB[:, :, :3, :3], poseA[:, :, :3, :3].permute(0, 1, 3, 2))
-
-            # Second path: same batch construction as above, implemented in ``video_data_vis`` (forked mp4 reader).
-            # batch2 = vis_batch_loader.getitem(start, end, B_in_cams_override=B_in_cams if it else None, prep_override=prep if it else None, verts_hum_override=verts_nlf_render if it else None)
-            
-            # _k1, _k2 = set(batch.keys()), set(batch2.keys())
-            # _mm = 0
-            # _only1 = sorted(_k1 - _k2)
-            # _only2 = sorted(_k2 - _k1)
-            # if _only1:
-            #     print(f"[batch-vs-batch2] only in batch: {_only1}")
-            #     _mm += len(_only1)
-            # if _only2:
-            #     print(f"[batch-vs-batch2] only in batch2: {_only2}")
-            #     _mm += len(_only2)
-            # for _k in sorted(_k1 & _k2):
-            #     _v1, _v2 = batch[_k], batch2[_k]
-            #     if torch.is_tensor(_v1) and torch.is_tensor(_v2):
-            #         if tuple(_v1.shape) != tuple(_v2.shape) or _v1.dtype != _v2.dtype:
-            #             print(
-            #                 f"[batch-vs-batch2] {_k}: shape/dtype mismatch "
-            #                 f"{tuple(_v1.shape)}/{_v1.dtype} vs {tuple(_v2.shape)}/{_v2.dtype}"
-            #             )
-            #             _mm += 1
-            #             continue
-            #         if torch.is_floating_point(_v1):
-            #             _a = _v1.detach().float().cpu()
-            #             _b = _v2.detach().float().cpu()
-            #             if not torch.allclose(_a, _b, rtol=1e-6, atol=1e-6):
-            #                 _d = (_a - _b).abs()
-            #                 print(
-            #                     f"[batch-vs-batch2] {_k}: max_abs={float(_d.max().item()):.6e}, "
-            #                     f"mean_abs={float(_d.mean().item()):.6e}"
-            #                 )
-            #                 _mm += 1
-            #         else:
-            #             if not torch.equal(_v1.detach().cpu(), _v2.detach().cpu()):
-            #                 print(f"[batch-vs-batch2] {_k}: not equal")
-            #                 _mm += 1
-            #     else:
-            #         if _v1 != _v2:
-            #             print(f"[batch-vs-batch2] {_k}: not equal")
-            #             _mm += 1
-            # if _mm == 0:
-            #     print("[batch-vs-batch2] all equal")
 
             mb0 = collated_batch_item_for_delta_gt(batch, bid=0)
             trans_delta_gt2 = normalized_trans_delta_gt_from_batch(mb0, cfg)
@@ -615,9 +501,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
 
             # update object pose
             prep = {}
-            B_in_cams, _ = trainer.compute_abspose(poseA.shape[0], batch, cfg, poseA, rot,
-                                                    rot_delta_gt,
-                                                    trans_delta_gt, trans_delta_pred, output)
             if cfg.use_intermediate:
                 B_in_cams = trainer.abspose_from_relative(batch, cfg, poseA, rot, trans_delta_pred)
 
@@ -671,8 +554,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
 
             # TODO: Render input
             verts_in = verts_nlf_render_init
-            verts_obj_batch = [np.matmul(verts_obj_base, pose_fp[:3, :3].T) + pose_fp[:3, 3] for pose_fp in
-                               B_in_cams_init]
+            verts_obj_batch = [np.matmul(verts_obj_base, pose_fp[:3, :3].T) + pose_fp[:3, 3] for pose_fp in B_in_cams_init]
             verts_comb_in = torch.from_numpy(np.concatenate([verts_in, np.stack(verts_obj_batch)], 1)).float().to(
                 device)  # (T, N_total, 3)
             _, rend_in, rend_in_side, _ = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_in)

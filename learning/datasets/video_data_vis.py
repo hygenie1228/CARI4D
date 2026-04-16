@@ -663,6 +663,7 @@ def horefine_vis_window_render_and_make_batch(
     trans_nlf: np.ndarray,
     poses_perturbed: list,
     frames_used: list,
+    full_colors: list,
     input_rgbms: list,
     input_xyzs: list,
     bboxes: list,
@@ -792,12 +793,19 @@ def horefine_vis_window_render_and_make_batch(
     trans_norm = torch.as_tensor(np.array(args.trans_normalizer), device=device, dtype=torch.float).repeat(
         len(poses_perturbed), 1
     )[None]
+    if full_colors:
+        full_hw = tuple(int(x) for x in full_colors[0].shape[:2])
+    else:
+        # Fallback when full-size frame is unavailable.
+        full_hw = tuple(int(x) for x in input_rgbms[0].shape[:2])
     batch = {
         **prep,
         "input_rgbs": torch.stack(input_rgbs_final, 0).cuda().float()[None],
         "render_rgbs": torch.from_numpy(np.stack(render_rgbs, axis=0)).cuda().float()[None],
         "input_xyz": torch.stack(input_xyz_final, 0).float().cuda()[None],
         "render_xyz": torch.stack(render_xyz, 0).float().cuda()[None],
+        # Keep the raw initialization poses so run_horefine can compare against its local B_in_cams_init.
+        "B_in_cams_init": B_in_cams.copy(),
         "mesh_diameter": mesh_diam_tensor,
         "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),
         "poseA_norm": torch.from_numpy(poseA_norm).float().cuda()[None],
@@ -808,6 +816,10 @@ def horefine_vis_window_render_and_make_batch(
         "smpl_poses_gt": torch.from_numpy(poses_full).float().cuda()[None],
         "smpl_transl_gt": torch.from_numpy(packed["trans"][start:end]).float().cuda()[None],
         "betas_gt": torch.from_numpy(betas_gt).float().cuda()[None],
+        "full_hw": full_hw,
+        # Expose preloaded metadata so run_horefine can reuse them directly.
+        "frames_used": list(frames_used),
+        "full_colors": [np.asarray(x).copy() for x in full_colors],
     }
     angles_gt = packed["obj_angles"][start:end].astype(np.float32)
     transl_gt = packed["obj_trans"][start:end].astype(np.float32)
@@ -947,6 +959,7 @@ def horefine_vis_rebuild_independent_window_batch(
             trans_nlf=trans_nlf,
             poses_perturbed=poses_perturbed,
             frames_used=frames_used,
+            full_colors=_fc,
             input_rgbms=input_rgbms,
             input_xyzs=input_xyzs,
             bboxes=bboxes,
@@ -1137,21 +1150,3 @@ class HoRefineVisBatchLoader:
             except Exception:
                 self._iter_verts_hum = None
         return self.stack_identical_copies(single)
-
-    # def __iter__(self) -> HoRefineVisBatchLoader:
-    #     self._spent = False
-    #     return self
-
-    # def __next__(self) -> dict:
-    #     if self._spent:
-    #         raise StopIteration
-    #     if self._start is None or self._end is None:
-    #         raise RuntimeError("HoRefineVisBatchLoader: call arm(start, end) before iter")
-    #     self._spent = True
-    #     return self.getitem(
-    #         self._start,
-    #         self._end,
-    #         B_in_cams_override=self._B_override,
-    #         prep_override=self._prep_override,
-    #         verts_hum_override=self._verts_override,
-    #     )
