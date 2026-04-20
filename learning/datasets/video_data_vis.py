@@ -555,8 +555,8 @@ def horefine_vis_window_build_prep_and_smpl_init(
     nlf_inds = np.array([nlf_data["frames"].index(x.split("/")[-1]) for x in frames_packed[start:end]])
     poses_nlf_init = nlf_data["poses"][nlf_inds, enum_idx].astype(np.float32)
     trans_nlf_init = nlf_data["transls"][nlf_inds, enum_idx].astype(np.float32)
-    betas = nlf_data["betas"][:, enum_idx].copy()
-    betas_avg = np.mean(betas, axis=0)[None].repeat(len(poses_nlf_init), axis=0)
+    betas_nlf_init = nlf_data["betas"][:, enum_idx].copy()
+    betas_avg = np.mean(betas_nlf_init, axis=0)[None].repeat(len(poses_nlf_init), axis=0)
     poses_full = packed["poses"][start:end].astype(np.float32)
     betas_gt = packed["betas"][start:end].astype(np.float32)
     verts_nlf_render_init = body_model(
@@ -585,6 +585,9 @@ def horefine_vis_window_build_prep_and_smpl_init(
         "trans_nlf_init": trans_nlf_init,
         "poses_nlf_init": poses_nlf_init,
         "betas_avg": betas_avg,
+        # Same as run_horefine.run_1seq local NLF indexing (for batch-driven reload).
+        "nlf_inds": nlf_inds,
+        "betas_nlf_init": betas_nlf_init,
     }
 
 
@@ -690,7 +693,12 @@ def horefine_vis_window_render_and_make_batch(
     vis_input: bool,
     vw_input: Any,
     append_vis_input: bool,
+    nlf_inds: np.ndarray,
+    poses_nlf_init: np.ndarray,
+    trans_nlf_init: np.ndarray,
+    betas_nlf_init: np.ndarray,
 ) -> dict:
+    """``betas_nlf_init`` is the raw NLF ``betas[:, cam]`` column; averaged+repeated for the batch key."""
     verts_obj_batch = [
         np.matmul(verts_obj_base, pose_fp[:3, :3].T) + pose_fp[:3, 3] for pose_fp in B_in_cams
     ]
@@ -798,29 +806,9 @@ def horefine_vis_window_render_and_make_batch(
     else:
         # Fallback when full-size frame is unavailable.
         full_hw = tuple(int(x) for x in input_rgbms[0].shape[:2])
-    batch = {
-        **prep,
-        "input_rgbs": torch.stack(input_rgbs_final, 0).cuda().float()[None],
-        "render_rgbs": torch.from_numpy(np.stack(render_rgbs, axis=0)).cuda().float()[None],
-        "input_xyz": torch.stack(input_xyz_final, 0).float().cuda()[None],
-        "render_xyz": torch.stack(render_xyz, 0).float().cuda()[None],
-        # Keep the raw initialization poses so run_horefine can compare against its local B_in_cams_init.
-        "B_in_cams_init": B_in_cams.copy(),
-        "mesh_diameter": mesh_diam_tensor,
-        "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),
-        "poseA_norm": torch.from_numpy(poseA_norm).float().cuda()[None],
-        "pose_perturbed": torch.from_numpy(B_in_cams)[None].float().cuda(),
-        "delta_transl": torch.zeros((1, len(poses_perturbed), 3), device=device),
-        "delta_rot": torch.zeros((1, len(poses_perturbed), 3, 3), device=device),
-        "K_rois": torch.from_numpy(np.stack(K_rois)).float().cuda()[None],
-        "smpl_poses_gt": torch.from_numpy(poses_full).float().cuda()[None],
-        "smpl_transl_gt": torch.from_numpy(packed["trans"][start:end]).float().cuda()[None],
-        "betas_gt": torch.from_numpy(betas_gt).float().cuda()[None],
-        "full_hw": full_hw,
-        # Expose preloaded metadata so run_horefine can reuse them directly.
-        "frames_used": list(frames_used),
-        "full_colors": [np.asarray(x).copy() for x in full_colors],
-    }
+    # Same as run_horefine: per-frame SMPL uses one averaged NLF shape repeated T times.
+    betas_nlf_init = np.mean(betas_nlf_init, axis=0)[None].repeat(len(poses_nlf_init), axis=0)
+
     angles_gt = packed["obj_angles"][start:end].astype(np.float32)
     transl_gt = packed["obj_trans"][start:end].astype(np.float32)
     R_wc = torch.from_numpy(w2c_rots[enum_idx]).to(device).float()
@@ -832,11 +820,50 @@ def horefine_vis_window_render_and_make_batch(
     pose_gt_mat = torch.eye(4, device=device, dtype=torch.float)[None].repeat(end - start, 1, 1)
     pose_gt_mat[:, :3, :3] = R_cam
     pose_gt_mat[:, :3, 3] = t_cam
-    batch["pose_gt"] = pose_gt_mat[None].clone()
-    poseA = batch["pose_perturbed"]
-    poseB = batch["pose_gt"]
-    batch["delta_transl"] = poseB[:, :, :3, 3] - poseA[:, :, :3, 3]
-    batch["delta_rot"] = torch.matmul(poseB[:, :, :3, :3], poseA[:, :, :3, :3].permute(0, 1, 3, 2))
+    pose_gt_batched = pose_gt_mat[None].clone()
+    pose_perturbed_tensor = torch.from_numpy(B_in_cams)[None].float().cuda()
+    delta_transl = pose_gt_batched[:, :, :3, 3] - pose_perturbed_tensor[:, :, :3, 3]
+    delta_rot = torch.matmul(
+        pose_gt_batched[:, :, :3, :3],
+        pose_perturbed_tensor[:, :, :3, :3].permute(0, 1, 3, 2),
+    )
+
+    hum_pose_gt = np.ascontiguousarray(poses_full.astype(np.float32, copy=False))
+    hum_betas_gt = np.ascontiguousarray(betas_gt.astype(np.float32, copy=False))
+    hum_transl_gt = np.ascontiguousarray(packed["trans"][start:end].astype(np.float32, copy=False))
+
+    batch = {
+        **prep,
+        "input_rgbs": torch.stack(input_rgbs_final, 0).cuda().float()[None],
+        "render_rgbs": torch.from_numpy(np.stack(render_rgbs, axis=0)).cuda().float()[None],
+        "input_xyz": torch.stack(input_xyz_final, 0).float().cuda()[None],
+        "render_xyz": torch.stack(render_xyz, 0).float().cuda()[None],
+        # Keep the raw initialization poses so run_horefine can compare against its local B_in_cams_init.
+        "B_in_cams_init": B_in_cams.copy(),
+        "mesh_diameter": mesh_diam_tensor,
+        "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),
+        "poseA_norm": torch.from_numpy(poseA_norm).float().cuda()[None],
+        "pose_perturbed": pose_perturbed_tensor,
+        "pose_gt": pose_gt_batched,
+        "delta_transl": delta_transl,
+        "delta_rot": delta_rot,
+        "K_rois": torch.from_numpy(np.stack(K_rois)).float().cuda()[None],
+        "smpl_poses_gt": torch.from_numpy(poses_full).float().cuda()[None],
+        "smpl_transl_gt": torch.from_numpy(hum_transl_gt).float().cuda()[None],
+        "betas_gt": torch.from_numpy(betas_gt).float().cuda()[None],
+        # NumPy GT SMPL (run_horefine: batch['hum_*'] without indexing packed).
+        "hum_pose_gt": hum_pose_gt,
+        "hum_betas_gt": hum_betas_gt,
+        "hum_transl_gt": hum_transl_gt,
+        "full_hw": full_hw,
+        # Expose preloaded metadata so run_horefine can reuse them directly.
+        "frames_used": list(frames_used),
+        "full_colors": [np.asarray(x).copy() for x in full_colors],
+        # NLF SMPL init (same source as horefine_vis_window_build_prep_and_smpl_init).
+        "poses_nlf_init": poses_nlf_init,
+        "trans_nlf_init": trans_nlf_init,
+        "betas_nlf_init": betas_nlf_init,
+    }
     return batch
 
 
@@ -907,6 +934,10 @@ def horefine_vis_rebuild_independent_window_batch(
         verts_nlf_render = (
             verts_hum_override.copy() if verts_hum_override is not None else w["verts_nlf_render_init"]
         )
+        nlf_inds = w["nlf_inds"]
+        poses_nlf_init = w["poses_nlf_init"]
+        trans_nlf_init = w["trans_nlf_init"]
+        betas_nlf_init = w["betas_nlf_init"]
     else:
         prep = prep_override
         poses_full = packed["poses"][start:end].astype(np.float32)
@@ -916,6 +947,10 @@ def horefine_vis_rebuild_independent_window_batch(
         else:
             verts_nlf_render = verts_hum_override.copy()
         trans_nlf = prep["nlf_transl"][0].detach().cpu().numpy()
+        nlf_inds = np.array([nlf_data["frames"].index(x.split("/")[-1]) for x in frames_packed[start:end]])
+        poses_nlf_init = nlf_data["poses"][nlf_inds, enum_idx].astype(np.float32)
+        trans_nlf_init = nlf_data["transls"][nlf_inds, enum_idx].astype(np.float32)
+        betas_nlf_init = nlf_data["betas"][:, enum_idx].copy()
 
     # Kinect readers are forward-only; main ``run_1seq`` already advanced ``ctx.controllers``.
     # Mirror ``prepare_video_mask_loader`` / ``init_video_controllers`` with fresh instances (same as reopening videos).
@@ -986,6 +1021,10 @@ def horefine_vis_rebuild_independent_window_batch(
             vis_input=vis_input,
             vw_input=vw_input,
             append_vis_input=bool(vis_input and record_indie_vis and vw_input is not None),
+            nlf_inds=nlf_inds,
+            poses_nlf_init=poses_nlf_init,
+            trans_nlf_init=trans_nlf_init,
+            betas_nlf_init=betas_nlf_init,
         )
     finally:
         for _c in controllers_reload:
@@ -1043,6 +1082,14 @@ class HoRefineVisBatchLoader:
         if self._vis_ctx is None:
             raise RuntimeError("HoRefineVisBatchLoader: missing ctx")
         return hydrate_horefine_vis_ctx(self._vis_ctx)
+
+    def frames_packed_len(self) -> int:
+        """Total number of valid packed frames for this sequence."""
+        c = self._resolve_ctx()
+        frames_packed = getattr(c, "frames_packed", None)
+        if frames_packed is None:
+            raise RuntimeError("HoRefineVisBatchLoader: ctx has no frames_packed")
+        return int(len(frames_packed))
 
     def stack_identical_copies(self, window: dict) -> dict:
         B = self.batch_size

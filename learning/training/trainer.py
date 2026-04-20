@@ -1648,7 +1648,7 @@ class Trainer(object):
         else:
             # additional visualization for human as well
             nlf_poses = batch['nlf_rotmat'].reshape(-1, J, 3, 3)  # B, T, J, 3, 3,
-            pred_smpl_t = batch['nlf_transl'].reshape(-1, 3) + out_dict['hum_trans']
+            pred_smpl_t = batch['nlf_transl'].reshape(-1, 3) # + out_dict['hum_trans']
             delta_pr_r = geom_utils.rot6d_to_rotmat(out_dict['hum_pose'].reshape(-1, 6)).reshape(-1, J, 3, 3)
 
             pred_smpl_r = delta_pr_r @ nlf_poses

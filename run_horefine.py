@@ -13,13 +13,11 @@ import re
 sys.path.append(os.getcwd())
 
 import os.path as osp
-import joblib
 import numpy as np
 import torch
 import torch.nn.functional as F
 import cv2
 import imageio
-import time
 from tqdm import tqdm
 import nvdiffrast.torch as dr
 from pytorch3d.renderer import look_at_view_transform
@@ -30,7 +28,7 @@ from typing import Any, Optional
 import Utils
 from Utils import load_smpl_obj_uvmap
 from tools import img_utils
-from behave_data.utils import load_kinect_poses_back, init_video_controllers
+from behave_data.utils import init_video_controllers
 from lib_smpl import get_smpl
 from lib_smpl.body_landmark import BodyLandmarks
 from behave_data.const import _sub_gender
@@ -38,7 +36,7 @@ from behave_data.behave_video import load_masks
 from prep.render_fp_nlf import BehaveFPNLFRenderer
 from tools.eval_base import ModelEvaluator
 from learning.training.trainer import Trainer
-from learning.datasets.video_data_vis import HoRefineVisBatchLoader, finalize_horefine_vis_ctx
+from learning.datasets.video_data_vis import HoRefineVisBatchLoader
 from lib_smpl import pose156to72, pose72to156, SMPL_ASSETS_ROOT
 import h5py
 
@@ -273,105 +271,33 @@ class HORefineRunner(BehaveFPNLFRenderer):
             if m:
                 video_prefix = m.group(1)
         seq_name = video_prefix
-        save_name = evaluator.get_save_name(cfg, trainer)
-        pth_file = f'{cfg.outpath}/{save_name}/{seq_name}.pth'
-        if osp.isfile(pth_file):
-            print(f'{pth_file} already exists, skipping')
-            return
 
-
-        fp_root = cfg.fp_root
-        fp_data = joblib.load(osp.join(fp_root, f'{seq_name}_all.pkl'))
-        fp_poses = fp_data['fp_poses']  # (T, K, 4, 4)
-        fp_frames = fp_data['frames']
         kids = [cfg.cam_id]
-        w2c_rots = [np.eye(3) for _ in kids]
-        w2c_trans = [np.zeros(3) for _ in kids]
-        obj_name = seq_name.split('_')[2]
         mesh_tensors, meshes = load_smpl_obj_uvmap(seq_name, use_hy3d=True, meshes_root=cfg.hy3d_meshes_root)
-        meshes_any: Any = meshes
         glctx = dr.RasterizeCudaContext()
-        render_size = (args.rend_size, args.rend_size)
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
-        # object-only tensors for mask computation/render (no texture path to avoid None textures)
         obj_idx = 1
-        verts_obj_base_t = meshes_any[obj_idx].verts_padded()[0].to(device).float()
-        tex = meshes[obj_idx].textures
-        uv = tex.verts_uvs_padded()[0]
-        uv[:, 1] = 1 - uv[:, 1]
-        mesh_tensors_obj = {
-            "tex": tex.maps_padded().to(device).float(),  # this must be (1, H, W, 3)
-            'uv_idx': torch.tensor(tex.faces_uvs_padded()[0], device=device, dtype=torch.int),
-            # correct way to get face uvs
-            'uv': uv.to(device).float(),
-            'pos': meshes[obj_idx].verts_padded()[0].to(device).float(),
-            'faces': torch.tensor(meshes[obj_idx].faces_padded()[0], device=device, dtype=torch.int),
-            'vnormals': meshes[obj_idx].verts_normals_padded()[0].to(device).float(),
-        }
-        # step 3: load one batch of images and human object masks and compute ROI/Kroi
-        t0 = time.time()
-        controllers, tar_mask = self.prepare_video_mask_loader(args, kids, video_prefix, cfg)
-        t1 = time.time()
-        print(f'mask pre-loading time: {t1 - t0:.4f}s')
-        gt_to_perturb_pose = np.eye(4)
+        verts_obj_base_t = meshes[obj_idx].verts_padded()[0].to(device).float()
 
         if not cfg.wild_video:
             center = np.zeros(3) # the mesh is already aligned with GT, hence no recentering needed
         else:
             center = np.mean(verts_obj_base_t.detach().cpu().numpy(), axis=0)  # simply the center
         print("Using center: ", center)
-        gt_to_perturb_pose[:3, 3] = center
         verts_obj_base = verts_obj_base_t.detach().cpu().numpy() - center  # need to subtract center
-        enum_idx, kid = 0, cfg.cam_id
-        
-        nlf_data = joblib.load(f'{cfg.nlf_root}/{video_prefix}_params.pkl')
-
-        # Prefer true GT packed labels when available.
-        packed = None
-        packed_root = getattr(cfg, "packed_root", None)
-        if packed_root:
-            packed_file = osp.join(packed_root, f"{seq_name}_GT-packed.pkl")
-            if osp.isfile(packed_file):
-                packed = joblib.load(packed_file)
-                print(f"loaded GT packed labels from {packed_file}")
-        if packed is None:
-            # Fallback: derive pseudo-GT from fp/nlf.
-            packed = {}
-            packed['obj_angles'] = R.from_matrix(fp_poses[:, enum_idx, :3, :3]).as_rotvec().astype(np.float32)
-            packed['obj_trans'] = fp_poses[:, enum_idx, :3, 3].astype(np.float32)
-            # convert from (T, K...) to (T,...)
-            packed['poses'] = nlf_data['poses'][:, 0].copy()
-            packed['betas'] = nlf_data['betas'][:, 0].copy()
-            packed['trans'] = nlf_data['transls'][:, 0].copy()
-            packed['frames'] = fp_frames
-        
-        frames_packed = packed['frames']
-        # take the frames as the joint set
-        frames_packed = [x for x in frames_packed if x in nlf_data['frames']]
         body_model = get_smpl(_sub_gender[video_prefix.split('_')[1]], hands=True).to(device)
-        betas_avg = np.mean(packed['betas'].reshape((-1, 10)), 0)
-        mesh_diameter = self.get_smpl_diameter(betas_avg, body_model)
         clip_len = int(getattr(cfg, 'clip_len', 16))
-        start = getattr(args, 'start', 0)
-        end = min(start + clip_len, len(fp_frames))
-        # Load packed GT once for frame availability and later GT usage
-        # Write visualization video: overlay front-view rendering on input RGB
         out_root = cfg.video_out
         os.makedirs(out_root, exist_ok=True)
-        if getattr(cfg, "hy3d_meshes_root", None):
-            exp_root = osp.dirname(osp.dirname(osp.abspath(cfg.hy3d_meshes_root)))
-        else:
-            exp_root = osp.dirname(args.video.rstrip("/"))
-        save_name = evaluator.get_save_name(cfg, trainer)
-        out_path = osp.join(out_root, f'{save_name}+{seq_name}_it{cfg.refine_iters}.mp4')
+        out_path = osp.join(out_root, f'it{cfg.refine_iters}.mp4')
         vw = imageio.get_writer(out_path, fps=30)
         landmark = BodyLandmarks(SMPL_ASSETS_ROOT)
-        iterations = cfg.refine_iters
-        H_full, W_full = None, None
+
         # For evaluation
         keys = ['pose_abs', 'smpl_pose', 'smpl_t', 'frames', 'betas', 'verts', 'contact_logits']
         data_gt, data_pr, data_in = {k: [] for k in keys}, {k: [] for k in keys}, {k: [] for k in keys}
         self.side_view_z = None # to render side view
+
         # Stats for in-run comparison logging in trainer.
         loss_t_eval_vals = []
         loss_t_eval_vals2 = []
@@ -380,78 +306,29 @@ class HORefineRunner(BehaveFPNLFRenderer):
         gt_fps = []
         input_fps = []
         input_parts = []
-        # Max |normalized delta_transl (render batch) - (metric/train batch)| per window when shapes match.
-        delta_gt_metric_vs_render_max_abs: list[float] = []
 
-        # Second reader for ``video_data_vis`` batch2: mp4 masks are sequential; main loop advances ``tar_mask``.
-        tar_mask_independent = tar_mask
-        _masks_root_vis = str(getattr(cfg, "masks_root", ""))
-        if "," in _masks_root_vis:
-            _mh, _mo = _masks_root_vis.split(",", 1)
-            if _mh.strip().lower().endswith(".mp4") and _mo.strip().lower().endswith(".mp4"):
-                tar_mask_independent = MP4MaskLoader(
-                    _mh.strip(), _mo.strip(), fps=float(getattr(args, "fps", 30))
-                )
-
-        for start in tqdm(range(0, len(frames_packed), clip_len)):
-            end = min(start + clip_len, len(frames_packed))
-            if end - start < clip_len:
-                print(f'not sufficient frames for one window: {start}->{end}, updating clip length and window to {end - start}')
-                # update everything
-                clip_len = end - start 
-                window = clip_len
-                cfg.clip_len = clip_len
-                cfg.window = clip_len
-            clip_len = end - start  # actual clip length
-            # pose_init_list, poseA_norm_list are no longer used.
-            K_rois, frames_used = [], []
-            poses_perturbed = []
-            full_colors = []  # store original RGB frames to reuse in visualization
-
-            prep = {}
-            # NLF-based SMPL fields: nlf_rotmat, nlf_transl, betas_gt, joints_nlf
-            nlf_inds = np.array([nlf_data['frames'].index(x.split('/')[-1]) for x in frames_packed[start:end]])
-
-            poses_nlf_init = nlf_data['poses'][nlf_inds, enum_idx].astype(np.float32)  # (T, 72)
-            trans_nlf_init = nlf_data['transls'][nlf_inds, enum_idx].astype(np.float32)  # (T, 3)
-            betas = nlf_data['betas'][:, enum_idx].copy()  # TODO: replace with GT DATA!
-            betas_avg = np.mean(betas, axis=0)[None].repeat(len(poses_nlf_init), axis=0)
-
-            # GT params
-            poses_full = packed['poses'][start:end].astype(np.float32)
-            betas_gt = packed['betas'][start:end].astype(np.float32)
-            verts_nlf_render_init = body_model(torch.from_numpy(poses_nlf_init).to(device),  # match
-                                               torch.from_numpy(betas_gt).to(device),  # match
-                                               torch.from_numpy(trans_nlf_init).to(device))[0].cpu().numpy()
-
-
+        total_frames = vis_batch_loader.frames_packed_len()
+        for start in tqdm(range(0, total_frames, clip_len)):
+            end = min(start + clip_len, total_frames)
+            
             batch = vis_batch_loader.getitem(start, end)
             B_in_cams_init = batch['B_in_cams_init']
             H_full, W_full = batch["full_hw"]
             frames_used = batch["frames_used"]
             full_colors = batch["full_colors"]
             K_rois = batch['K_rois']
-
-            # Compute GT object pose in camera coordinates (B, T, 4, 4)
-            angles_gt = packed['obj_angles'][start:end].astype(np.float32)
-            transl_gt = packed['obj_trans'][start:end].astype(np.float32)
-            R_wc = torch.from_numpy(w2c_rots[enum_idx]).to(device).float()
-            t_wc = torch.from_numpy(w2c_trans[enum_idx]).to(device).float()
-            R_obj = torch.from_numpy(R.from_rotvec(angles_gt).as_matrix()).to(device).float()  # (T, 3, 3)
-            t_world = torch.from_numpy(transl_gt).to(device).float()  # (T, 3)
-            R_cam = torch.matmul(R_wc[None].expand(end - start, -1, -1), R_obj)  # (T, 3, 3)
-            t_cam = torch.matmul(t_world, R_wc.T) + t_wc  # (T, 3)
-            pose_gt_mat = torch.eye(4, device=device, dtype=torch.float)[None].repeat(end - start, 1, 1)
-            pose_gt_mat[:, :3, :3] = R_cam
-            pose_gt_mat[:, :3, 3] = t_cam
-            batch['pose_gt'] = pose_gt_mat[None].clone()  # (B, T, 4, 4)
-
             poseA = batch['pose_perturbed']
             poseB = batch['pose_gt']
 
-            # compute real delta
-            batch['delta_transl'] = poseB[:, :, :3, 3] - poseA[:, :, :3, 3]
-            batch['delta_rot'] = torch.matmul(poseB[:, :, :3, :3], poseA[:, :, :3, :3].permute(0, 1, 3, 2))
+            # Init Params
+            poses_nlf_init = batch['poses_nlf_init']
+            trans_nlf_init = batch['trans_nlf_init']
+            betas_nlf_init = batch['betas_nlf_init']
+
+            # GT params
+            poses_gt = batch['hum_pose_gt']
+            betas_gt = batch['hum_betas_gt']
+            trans_gt = batch['hum_transl_gt']
 
             mb0 = collated_batch_item_for_delta_gt(batch, bid=0)
             trans_delta_gt2 = normalized_trans_delta_gt_from_batch(mb0, cfg)
@@ -482,6 +359,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
                     ).mean().item() * float(getattr(cfg, "w_rot", 1.0))
                 )
             )
+
+
             if ("hum_pose" in output) and ("delta_smpl_rot" in batch):
                 gt_delta_r = batch["delta_smpl_rot"][:, :, :, :, :2].reshape(-1, 24 * 6)
                 hum_pose = output["hum_pose"]
@@ -492,31 +371,27 @@ class HORefineRunner(BehaveFPNLFRenderer):
                         ).mean().item() * float(getattr(cfg, "w_hum_rot", 1.0))
                     )
                 )
-            if hasattr(trainer, "coconet_gt_fingerprint"):
-                gt_fps.append(trainer.coconet_gt_fingerprint(batch))
-            if hasattr(trainer, "coconet_model_input_fingerprint"):
-                input_fps.append(trainer.coconet_model_input_fingerprint(batch))
-            if hasattr(trainer, "coconet_model_input_fingerprint_parts"):
-                input_parts.append(trainer.coconet_model_input_fingerprint_parts(batch))
 
             # update object pose
             prep = {}
-            if cfg.use_intermediate:
-                B_in_cams = trainer.abspose_from_relative(batch, cfg, poseA, rot, trans_delta_pred)
+            B_in_cams = trainer.abspose_from_relative(batch, cfg, poseA, rot, trans_delta_pred)
 
             #### Start of update SMPL pose
-            betas, pred_smpl_pose, pred_smpl_r, pred_smpl_t = trainer.smpl_params_from_pred(batch, output)
+            pred_betas, pred_smpl_pose, pred_smpl_r, pred_smpl_t = trainer.smpl_params_from_pred(batch, output)
             pred_smpl_pose = pose72to156(pred_smpl_pose)
             # still use the old NLF translation
 
-            verts_nlf_render = body_model(pred_smpl_pose,  # match
-                                            torch.from_numpy(betas_gt).to(device),  # match
-                                            torch.from_numpy(trans_nlf_init).float().to(device)
-                                            )[0].cpu().numpy()
+            verts_init = body_model(torch.from_numpy(poses_nlf_init).to(device),  # match
+                                               torch.from_numpy(betas_nlf_init).to(device),  # match
+                                               torch.from_numpy(trans_nlf_init).to(device))[0].cpu().numpy()
+
+            verts_pred = body_model(pred_smpl_pose, pred_betas, pred_smpl_t)[0].cpu().numpy()
+
+        
             prep['nlf_transl'] = torch.from_numpy(trans_nlf_init).float().to(device)[None].to(device).float()  # matches
 
             # joints from landmarks
-            joints_nlf_np = landmark.get_body_kpts_batch(verts_nlf_render)  # (T, 25, 3)
+            joints_nlf_np = landmark.get_body_kpts_batch(verts_pred)  # (T, 25, 3)
             prep['joints_nlf'] = torch.from_numpy(joints_nlf_np)[None].to(device).float()
             # rotation matrices per joint
             poses_nlf = pred_smpl_pose.cpu().numpy()  # (T, 72)
@@ -549,14 +424,12 @@ class HORefineRunner(BehaveFPNLFRenderer):
             verts_comb_pr = torch.cat([verts_pr, obj_verts_pr], dim=1)  # (T, N_total, 3)
 
             # Convert to clip space and render batch at once
-            mtx_front, rend_pr, rend_pr_side, view_mat = self.render_front_side(H, K, W, glctx, mesh_tensors,
-                                                                                verts_comb_pr)
+            # HERE
+            mtx_front, rend_pr, rend_pr_side, view_mat = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_pr)
 
             # TODO: Render input
-            verts_in = verts_nlf_render_init
             verts_obj_batch = [np.matmul(verts_obj_base, pose_fp[:3, :3].T) + pose_fp[:3, 3] for pose_fp in B_in_cams_init]
-            verts_comb_in = torch.from_numpy(np.concatenate([verts_in, np.stack(verts_obj_batch)], 1)).float().to(
-                device)  # (T, N_total, 3)
+            verts_comb_in = torch.from_numpy(np.concatenate([verts_init, np.stack(verts_obj_batch)], 1)).float().to(device)  # (T, N_total, 3)
             _, rend_in, rend_in_side, _ = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_in)
 
             files = frames_used
@@ -574,7 +447,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
             data_gt['smpl_t'].append(batch['smpl_transl_gt'].reshape(-1, 3))
             data_gt['betas'].append(batch['betas_gt'].reshape(-1, 10))
             data_pr['verts'].append(verts_pr)
-            data_in['verts'].append(torch.from_numpy(verts_in).to(device).float())
+            data_in['verts'].append(torch.from_numpy(verts_init).to(device).float())
 
             # add contact logits
             if 'contact' in output:
@@ -593,24 +466,21 @@ class HORefineRunner(BehaveFPNLFRenderer):
             # Input data
             data_in['smpl_pose'].append(torch.from_numpy(poses_nlf_init).to(device).float().reshape(-1, 156))
             data_in['smpl_t'].append(torch.from_numpy(trans_nlf_init).to(device).float().reshape(-1, 3))
+            betas_avg = np.mean(betas_gt, axis=0)[None].repeat(len(poses_nlf_init), axis=0)
             data_in['betas'].append(torch.from_numpy(betas_avg).to(device).float().reshape(-1, 10))
+
+            
             # Prepare GT SMPL and object for visualization
             if not cfg.wild_video:
-                smpl_t_world = packed['trans'][start:end].astype(np.float32)
-                vs_gt_world = body_model(torch.from_numpy(poses_full).to(device),
-                                         batch['betas_gt'].reshape(-1, 10).to(device),
-                                         torch.from_numpy(smpl_t_world).to(device))[0]
+                vs_gt_world = body_model(torch.from_numpy(poses_gt).to(device),
+                                         torch.from_numpy(betas_gt).to(device),
+                                         torch.from_numpy(trans_gt).to(device))[0]
+                
                 data_gt['verts'].append(vs_gt_world)
 
-                # GT object verts in camera
-                angles_gt = packed['obj_angles'][start:end].astype(np.float32)
-                transl_gt = packed['obj_trans'][start:end].astype(np.float32)
-                R_obj = torch.from_numpy(R.from_rotvec(angles_gt).as_matrix()).to(device).float()  # (T, 3, 3)
-                t_world = torch.from_numpy(transl_gt).to(device).float()  # (T, 3)
-                R_wc_t = torch.from_numpy(w2c_rots[enum_idx]).to(device).float()
-                t_wc_t = torch.from_numpy(w2c_trans[enum_idx]).to(device).float()
-                R_cam = torch.matmul(R_wc_t[None].expand(end - start, -1, -1), R_obj)
-                t_cam = torch.matmul(t_world, R_wc_t.T) + t_wc_t
+                # GT object verts are already available in camera coordinates via pose_gt.
+                R_cam = poseB[0, :, :3, :3].to(device).float()
+                t_cam = poseB[0, :, :3, 3].to(device).float()
                 obj_verts_gt = torch.matmul(
                     obj_base_centered[None].expand(end - start, -1, -1),
                     R_cam.permute(0, 2, 1),
@@ -624,7 +494,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
 
             try:
                 for j in tqdm(range(end - start)):
-                    frame_time = fp_frames[start + j]
+                    frame_time = osp.basename(frames_used[j])
                     # reuse preloaded color
                     color = cv2.resize(full_colors[j], (W, H))
                     in_comb = self.comb_front_side(color, rend_in[j], rend_in_side[j])
@@ -661,7 +531,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
         vw.close()
         print(f'visualization saved to {out_path}')
         # save result as one pth file 
-        pth_file = f'{cfg.outpath}/{save_name}/{seq_name}.pth'
+        pth_file = f'{cfg.outpath}/{seq_name}.pth'
         os.makedirs(osp.dirname(pth_file), exist_ok=True)
         data_pr = {k: torch.cat(v, 0) if k != 'frames' and len(v) > 0 else v for k, v in data_pr.items()}
         data_gt = {k: torch.cat(v, 0) if k != 'frames' and len(v) > 0 else v for k, v in data_gt.items()}
@@ -752,13 +622,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
             "metric_batch_gt_fps": metric_batch_gt_fps,
             "metric_batch_input_fps": metric_batch_input_fps,
             "metric_batch_input_parts": metric_batch_input_parts,
-            "delta_transl_norm_train_vs_render_max_abs": (
-                max(delta_gt_metric_vs_render_max_abs) if delta_gt_metric_vs_render_max_abs else None
-            ),
         }
-        _dmax = self.last_run_1seq_stats["delta_transl_norm_train_vs_render_max_abs"]
-        if _dmax is not None:
-            print(f"[run_1seq] max |normalized delta_transl (render path) - (train batch)|: {_dmax:.6e}")
         return self.last_run_1seq_stats
 
     def comb_front_side(self, color, rp, rp_side):
