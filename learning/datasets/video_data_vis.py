@@ -833,12 +833,26 @@ def horefine_vis_window_render_and_make_batch(
     hum_transl_gt = np.ascontiguousarray(packed["trans"][start:end].astype(np.float32, copy=False))
 
     batch = {
-        **prep,
+        ## Input
         "input_rgbs": torch.stack(input_rgbs_final, 0).cuda().float()[None],
         "render_rgbs": torch.from_numpy(np.stack(render_rgbs, axis=0)).cuda().float()[None],
         "input_xyz": torch.stack(input_xyz_final, 0).float().cuda()[None],
         "render_xyz": torch.stack(render_xyz, 0).float().cuda()[None],
-        # Keep the raw initialization poses so run_horefine can compare against its local B_in_cams_init.
+        
+        "hum_pose_init": poses_nlf_init,
+        "hum_transl_init": trans_nlf_init,
+        "hum_betas_init": betas_nlf_init,
+
+        ## Target
+        "hum_pose_gt": hum_pose_gt,
+        "hum_betas_gt": hum_betas_gt,
+        "hum_transl_gt": hum_transl_gt,
+
+        "joints_nlf": prep["joints_nlf"],
+        "nlf_rotmat": prep["nlf_rotmat"],
+        "nlf_transl": prep["nlf_transl"],
+        
+        ## Meta
         "B_in_cams_init": B_in_cams.copy(),
         "mesh_diameter": mesh_diam_tensor,
         "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),
@@ -848,21 +862,10 @@ def horefine_vis_window_render_and_make_batch(
         "delta_transl": delta_transl,
         "delta_rot": delta_rot,
         "K_rois": torch.from_numpy(np.stack(K_rois)).float().cuda()[None],
-        "smpl_poses_gt": torch.from_numpy(poses_full).float().cuda()[None],
-        "smpl_transl_gt": torch.from_numpy(hum_transl_gt).float().cuda()[None],
-        "betas_gt": torch.from_numpy(betas_gt).float().cuda()[None],
-        # NumPy GT SMPL (run_horefine: batch['hum_*'] without indexing packed).
-        "hum_pose_gt": hum_pose_gt,
-        "hum_betas_gt": hum_betas_gt,
-        "hum_transl_gt": hum_transl_gt,
         "full_hw": full_hw,
-        # Expose preloaded metadata so run_horefine can reuse them directly.
         "frames_used": list(frames_used),
         "full_colors": [np.asarray(x).copy() for x in full_colors],
-        # NLF SMPL init (same source as horefine_vis_window_build_prep_and_smpl_init).
-        "poses_nlf_init": poses_nlf_init,
-        "trans_nlf_init": trans_nlf_init,
-        "betas_nlf_init": betas_nlf_init,
+        
     }
     return batch
 

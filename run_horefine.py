@@ -321,20 +321,27 @@ class HORefineRunner(BehaveFPNLFRenderer):
             poseB = batch['pose_gt']
 
             # Init Params
-            poses_nlf_init = batch['poses_nlf_init']
-            trans_nlf_init = batch['trans_nlf_init']
-            betas_nlf_init = batch['betas_nlf_init']
+            poses_nlf_init = batch['hum_pose_init']
+            trans_nlf_init = batch['hum_transl_init']
+            betas_nlf_init = batch['hum_betas_init']
 
             # GT params
             poses_gt = batch['hum_pose_gt']
             betas_gt = batch['hum_betas_gt']
             trans_gt = batch['hum_transl_gt']
+            betas_gt_t = torch.from_numpy(np.asarray(betas_gt, dtype=np.float32)).to(device).float()[None]
+            betas_nlf_t = torch.from_numpy(np.asarray(betas_nlf_init, dtype=np.float32)).to(device).float()[None]
+            nlf_poses_t = torch.from_numpy(np.asarray(poses_nlf_init, dtype=np.float32)).to(device).float()[None]
+            batch_model = dict(batch)
+            batch_model["betas_gt"] = betas_gt_t
+            batch_model["betas_nlf"] = betas_nlf_t
+            batch_model["nlf_poses"] = nlf_poses_t
 
             mb0 = collated_batch_item_for_delta_gt(batch, bid=0)
             trans_delta_gt2 = normalized_trans_delta_gt_from_batch(mb0, cfg)
 
             # import pdb; pdb.set_trace() # do not remove !!!(for debugging)
-            rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = trainer.forward_batch(batch, cfg,
+            rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = trainer.forward_batch(batch_model, cfg,
                                                                                                 trainer.model,
                                                                                                 ret_dict=True,
                                                                                                 vis=False)
@@ -361,8 +368,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
             )
 
 
-            if ("hum_pose" in output) and ("delta_smpl_rot" in batch):
-                gt_delta_r = batch["delta_smpl_rot"][:, :, :, :, :2].reshape(-1, 24 * 6)
+            if ("hum_pose" in output) and ("delta_smpl_rot" in batch_model):
+                gt_delta_r = batch_model["delta_smpl_rot"][:, :, :, :, :2].reshape(-1, 24 * 6)
                 hum_pose = output["hum_pose"]
                 loss_hum_r_vals.append(
                     float(
@@ -374,10 +381,10 @@ class HORefineRunner(BehaveFPNLFRenderer):
 
             # update object pose
             prep = {}
-            B_in_cams = trainer.abspose_from_relative(batch, cfg, poseA, rot, trans_delta_pred)
+            B_in_cams = trainer.abspose_from_relative(batch_model, cfg, poseA, rot, trans_delta_pred)
 
             #### Start of update SMPL pose
-            pred_betas, pred_smpl_pose, pred_smpl_r, pred_smpl_t = trainer.smpl_params_from_pred(batch, output)
+            pred_betas, pred_smpl_pose, pred_smpl_r, pred_smpl_t = trainer.smpl_params_from_pred(batch_model, output)
             pred_smpl_pose = pose72to156(pred_smpl_pose)
             # still use the old NLF translation
 
@@ -417,9 +424,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
             obj_verts_pr = torch.matmul(obj_base_centered[None].expand(end - start, -1, -1),
                                         R_pred.permute(0, 2, 1)) + t_pred[:, None]
 
-            verts_pr = body_model(pred_smpl_pose.to(device),
-                                          batch['betas_gt'].reshape(-1, 10).to(device),
-                                          pred_smpl_t.to(device))[0]
+            verts_pr = body_model(pred_smpl_pose.to(device), betas_gt_t.reshape(-1, 10), pred_smpl_t.to(device))[0]
 
             verts_comb_pr = torch.cat([verts_pr, obj_verts_pr], dim=1)  # (T, N_total, 3)
 
@@ -442,10 +447,10 @@ class HORefineRunner(BehaveFPNLFRenderer):
 
             data_pr['smpl_pose'].append(pred_smpl_pose)  # (BT, 156)
             data_pr['smpl_t'].append(pred_smpl_t)
-            data_pr['betas'].append(batch['betas_gt'].reshape(-1, 10))
-            data_gt['smpl_pose'].append(batch['smpl_poses_gt'].reshape(-1, 156))
-            data_gt['smpl_t'].append(batch['smpl_transl_gt'].reshape(-1, 3))
-            data_gt['betas'].append(batch['betas_gt'].reshape(-1, 10))
+            data_pr['betas'].append(betas_gt_t.reshape(-1, 10))
+            data_gt['smpl_pose'].append(torch.from_numpy(poses_gt).to(device).float().reshape(-1, 156))
+            data_gt['smpl_t'].append(torch.from_numpy(trans_gt).to(device).float().reshape(-1, 3))
+            data_gt['betas'].append(torch.from_numpy(betas_gt).to(device).float().reshape(-1, 10))
             data_pr['verts'].append(verts_pr)
             data_in['verts'].append(torch.from_numpy(verts_init).to(device).float())
 
@@ -781,10 +786,16 @@ def write_finetune_horefine_style_mp4(
         pose_gt = batch["pose_gt"].float()
         T = pose_in.shape[1]
 
-        nlf_p = batch["nlf_poses"][bid].reshape(T, -1).float().to(device)
+        if "nlf_poses" in batch:
+            nlf_p = batch["nlf_poses"][bid].reshape(T, -1).float().to(device)
+        else:
+            nlf_p = torch.from_numpy(np.asarray(batch["hum_pose_init"], dtype=np.float32)).to(device).reshape(T, -1)
         if nlf_p.shape[-1] != 156:
             raise ValueError(f"expected nlf_poses last dim 156, got {nlf_p.shape}")
-        betas_gt_bt = batch["betas_gt"][bid].reshape(T, 10).float().to(device)
+        if "betas_gt" in batch:
+            betas_gt_bt = batch["betas_gt"][bid].reshape(T, 10).float().to(device)
+        else:
+            betas_gt_bt = torch.from_numpy(np.asarray(batch["hum_betas_gt"], dtype=np.float32)).to(device).reshape(T, 10)
         nlf_trans_bt = batch["nlf_transl"][bid].reshape(T, 3).float().to(device)
         verts_nlf = body_model(nlf_p, betas_gt_bt, nlf_trans_bt)[0]
 
@@ -805,11 +816,18 @@ def write_finetune_horefine_style_mp4(
         obj_v_pr = torch.matmul(obj_base_centered[None].expand(T, -1, -1), R_pr.permute(0, 2, 1)) + t_pr[:, None]
         verts_comb_pr = torch.cat([verts_pr, obj_v_pr], dim=1)
 
-        gt156 = batch["smpl_poses_gt"][bid].reshape(T, -1).float().to(device)
+        if "smpl_poses_gt" in batch:
+            gt156 = batch["smpl_poses_gt"][bid].reshape(T, -1).float().to(device)
+        else:
+            gt156 = torch.from_numpy(np.asarray(batch["hum_pose_gt"], dtype=np.float32)).to(device).reshape(T, -1)
+        if "smpl_transl_gt" in batch:
+            smpl_t_gt = batch["smpl_transl_gt"][bid].reshape(T, 3).float().to(device)
+        else:
+            smpl_t_gt = torch.from_numpy(np.asarray(batch["hum_transl_gt"], dtype=np.float32)).to(device).reshape(T, 3)
         verts_gt = body_model(
             gt156,
             betas_gt_bt,
-            batch["smpl_transl_gt"][bid].reshape(T, 3).float().to(device),
+            smpl_t_gt,
         )[0]
         R_gt = pose_gt[bid, :, :3, :3].to(device)
         t_gt = pose_gt[bid, :, :3, 3].to(device)
