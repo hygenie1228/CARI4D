@@ -125,6 +125,101 @@ def _derive_seq_and_video_prefix(partial: Any) -> tuple[str, str]:
     return sq, vp
 
 
+def _build_nlf_from_human_init_npz(human_npz_path: str, fp_frames: list[str]) -> dict[str, Any]:
+    z = np.load(human_npz_path, allow_pickle=True)
+    required = ["global_orient", "body_pose", "lhand_pose", "rhand_pose", "betas", "trans"]
+    missing = [k for k in required if k not in z]
+    if missing:
+        raise KeyError(f"missing keys in {human_npz_path}: {missing}")
+
+    go = np.asarray(z["global_orient"], dtype=np.float32)
+    bp = np.asarray(z["body_pose"], dtype=np.float32)
+    lh = np.asarray(z["lhand_pose"], dtype=np.float32)
+    rh = np.asarray(z["rhand_pose"], dtype=np.float32)
+    betas = np.asarray(z["betas"], dtype=np.float32)
+    trans = np.asarray(z["trans"], dtype=np.float32)
+    poses = np.concatenate([go, bp, lh, rh], axis=1).astype(np.float32)  # (T, 156)
+
+    # fp_frames are usually zero-padded frame indices (e.g. "000030").
+    # If parsing fails, fall back to leading contiguous frames.
+    parsed: list[int] = []
+    parse_ok = True
+    for fr in fp_frames:
+        s = osp.splitext(osp.basename(str(fr)))[0]
+        try:
+            parsed.append(int(s[1:]) if s.startswith("t") else int(s))
+        except ValueError:
+            parse_ok = False
+            break
+
+    if parse_ok:
+        if len(parsed) == 0:
+            raise ValueError("fp_frames is empty while building nlf_data")
+        if max(parsed) >= len(poses):
+            raise ValueError(
+                f"human init npz has fewer frames ({len(poses)}) than requested max frame index ({max(parsed)})"
+            )
+        poses_sel = poses[parsed]
+        betas_sel = betas[parsed]
+        trans_sel = trans[parsed]
+    else:
+        n = len(fp_frames)
+        if len(poses) < n:
+            raise ValueError(f"human init npz has fewer frames ({len(poses)}) than fp_frames ({n})")
+        poses_sel = poses[:n]
+        betas_sel = betas[:n]
+        trans_sel = trans[:n]
+
+    gender = str(z["gender"].item()) if "gender" in z else "neutral"
+    return {
+        "poses": poses_sel[:, None, :].astype(np.float32),
+        "betas": betas_sel[:, None, :].astype(np.float32),
+        "transls": trans_sel[:, None, :].astype(np.float32),
+        "frames": [str(x) for x in fp_frames],
+        "gender": gender,
+        "kids": [0],
+    }
+
+
+def _build_fp_from_object_init_npz(object_npz_path: str, fp_frames: list[str]) -> tuple[np.ndarray, list[str]]:
+    z = np.load(object_npz_path, allow_pickle=True)
+    required = ["angle", "trans"]
+    missing = [k for k in required if k not in z]
+    if missing:
+        raise KeyError(f"missing keys in {object_npz_path}: {missing}")
+    angles = np.asarray(z["angle"], dtype=np.float32)
+    trans = np.asarray(z["trans"], dtype=np.float32)
+    if angles.shape != trans.shape or angles.ndim != 2 or angles.shape[1] != 3:
+        raise ValueError(f"invalid object init shapes angle={angles.shape}, trans={trans.shape}")
+
+    parsed: list[int] = []
+    parse_ok = True
+    for fr in fp_frames:
+        s = osp.splitext(osp.basename(str(fr)))[0]
+        try:
+            parsed.append(int(s[1:]) if s.startswith("t") else int(s))
+        except ValueError:
+            parse_ok = False
+            break
+
+    if parse_ok and len(parsed) > 0 and max(parsed) < len(angles):
+        a_sel = angles[parsed]
+        t_sel = trans[parsed]
+        frames_out = [str(x) for x in fp_frames]
+    else:
+        n = len(fp_frames)
+        if len(angles) < n:
+            raise ValueError(f"object init npz has fewer frames ({len(angles)}) than required ({n})")
+        a_sel = angles[:n]
+        t_sel = trans[:n]
+        frames_out = [str(x) for x in fp_frames]
+
+    fp_poses = np.repeat(np.eye(4, dtype=np.float32)[None, None, :, :], len(a_sel), axis=0)
+    fp_poses[:, 0, :3, :3] = R.from_rotvec(a_sel).as_matrix().astype(np.float32)
+    fp_poses[:, 0, :3, 3] = t_sel.astype(np.float32)
+    return fp_poses, frames_out
+
+
 class _MP4MaskLoader:
     """Local copy of the sequential MP4 mask loader."""
 
@@ -571,10 +666,8 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
     partial.principal_point = principal_point
     partial.K_full = K_full
 
-    fp_root = cfg.fp_root
-    fp_data = joblib.load(osp.join(fp_root, f"{seq_name}_all.pkl"))
-    fp_poses = fp_data["fp_poses"]
-    fp_frames = fp_data["frames"]
+    fp_poses = None
+    fp_frames = None
     kids = [cfg.cam_id]
     w2c_rots = [np.eye(3) for _ in kids]
     w2c_trans = [np.zeros(3) for _ in kids]
@@ -615,6 +708,28 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
     frame_cache_dir = osp.join(exp_root, "data", "rgbd_frame_cache", seq_name, f"cam{kid}")
     mask_cache_dir = osp.join(exp_root, "data", "mask_frame_cache", seq_name, f"cam{kid}")
     render_cache_dir = osp.join(exp_root, "data", "render_frame_cache", seq_name, f"cam{kid}")
+    human_init_npz = osp.join(exp_root, "human", "human_params_init.npz")
+    object_init_npz = osp.join(exp_root, "object", "object_params_init.npz")
+    if not osp.isfile(human_init_npz):
+        raise FileNotFoundError(f"missing required init npz: {human_init_npz}")
+    if not osp.isfile(object_init_npz):
+        raise FileNotFoundError(f"missing required init npz: {object_init_npz}")
+
+    packed = None
+    packed_root = getattr(cfg, "packed_root", None)
+    if packed_root:
+        packed_file = osp.join(packed_root, f"{seq_name}_GT-packed.pkl")
+        if osp.isfile(packed_file):
+            packed = joblib.load(packed_file)
+            print(f"loaded GT packed labels from {packed_file}")
+            fp_frames = [str(x) for x in packed.get("frames", [])]
+    if fp_frames is None:
+        z_obj = np.load(object_init_npz, allow_pickle=True)
+        n_obj = int(np.asarray(z_obj["angle"]).shape[0])
+        fp_frames = [f"{i:06d}" for i in range(n_obj)]
+
+    fp_poses, fp_frames = _build_fp_from_object_init_npz(object_init_npz, fp_frames)
+    nlf_data = _build_nlf_from_human_init_npz(human_init_npz, fp_frames)
     _ensure_rgbd_frame_cache(
         frame_cache_dir=frame_cache_dir,
         fp_frames=fp_frames,
@@ -628,15 +743,6 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
         fp_frames=fp_frames,
         mask_loader=tar_mask.fork(),
     )
-    nlf_data = joblib.load(f"{cfg.nlf_root}/{video_prefix}_params.pkl")
-
-    packed = None
-    packed_root = getattr(cfg, "packed_root", None)
-    if packed_root:
-        packed_file = osp.join(packed_root, f"{seq_name}_GT-packed.pkl")
-        if osp.isfile(packed_file):
-            packed = joblib.load(packed_file)
-            print(f"loaded GT packed labels from {packed_file}")
     if packed is None:
         packed = {}
         packed["obj_angles"] = R.from_matrix(fp_poses[:, enum_idx, :3, :3]).as_rotvec().astype(np.float32)
