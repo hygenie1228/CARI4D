@@ -99,7 +99,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
         out_root = cfg.video_out
         os.makedirs(out_root, exist_ok=True)
         out_path = osp.join(out_root, f'it{cfg.refine_iters}.mp4')
-        vw = imageio.get_writer(out_path, fps=30)
+        # Keep exact panel resolution; avoid ffmpeg auto-resize warning.
+        vw = imageio.get_writer(out_path, fps=30, macro_block_size=1)
         landmark = BodyLandmarks(SMPL_ASSETS_ROOT)
 
         # For evaluation

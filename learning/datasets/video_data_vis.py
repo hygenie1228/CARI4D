@@ -1,10 +1,9 @@
-# HoRefine viz: batch stacking + independent window rebuild (mirrors ``run_1seq`` batch construction).
-
 from __future__ import annotations
 
 import os
 import os.path as osp
 import re
+import json
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -205,6 +204,62 @@ def _horefine_prepare_video_mask_loader(args: Any, kids: list, video_prefix: str
         print(f"loading masks from {h5_path}")
         tar_mask = h5py.File(h5_path, "r")
     return controllers, tar_mask
+
+
+def _frame_cache_file(frame_cache_dir: str, idx: int) -> str:
+    return osp.join(frame_cache_dir, f"{idx:06d}.npz")
+
+
+def _frame_cache_meta_file(frame_cache_dir: str) -> str:
+    return osp.join(frame_cache_dir, "_meta.json")
+
+
+def _load_cached_rgbd_frame(frame_cache_dir: str, idx: int) -> tuple[np.ndarray, np.ndarray]:
+    with np.load(_frame_cache_file(frame_cache_dir, idx)) as d:
+        return d["color"], d["depth"]
+
+
+def _ensure_rgbd_frame_cache(
+    *,
+    frame_cache_dir: str,
+    fp_frames: list,
+    controllers: list,
+    kids: list,
+    enum_idx: int,
+    fps: float = 30.0,
+) -> None:
+    cache_version = 1
+    os.makedirs(frame_cache_dir, exist_ok=True)
+    meta_fp = _frame_cache_meta_file(frame_cache_dir)
+    rebuild_cache = True
+    if osp.isfile(meta_fp):
+        try:
+            meta = json.load(open(meta_fp, "r"))
+            rebuild_cache = not (
+                int(meta.get("version", -1)) == cache_version
+                and int(meta.get("num_frames", -1)) == int(len(fp_frames))
+            )
+        except Exception:
+            rebuild_cache = True
+    if rebuild_cache:
+        for fn in os.listdir(frame_cache_dir):
+            if fn.endswith(".npz") or fn == "_meta.json":
+                try:
+                    os.remove(osp.join(frame_cache_dir, fn))
+                except OSError:
+                    pass
+    for idx, frame_time in enumerate(fp_frames):
+        cache_fp = _frame_cache_file(frame_cache_dir, idx)
+        if osp.isfile(cache_fp):
+            continue
+        t = float(str(frame_time)[1:])
+        actual_times = np.array([controllers[x].get_closest_time(t) for x, _ in enumerate(kids)])
+        best_kid = np.argmin(np.abs(actual_times - t))
+        actual_time = actual_times[best_kid]
+        color, depth = controllers[enum_idx].get_closest_frame(actual_time)
+        np.savez_compressed(cache_fp, color=np.asarray(color, dtype=np.uint8), depth=np.asarray(depth))
+    with open(meta_fp, "w") as f:
+        json.dump({"version": cache_version, "num_frames": int(len(fp_frames))}, f)
 
 
 def _horefine_get_smpl_diameter(betas_avg: np.ndarray, smpl_model: Any) -> float:
@@ -448,6 +503,22 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
     gt_to_perturb_pose[:3, 3] = center
     verts_obj_base = verts_obj_base_t.detach().cpu().numpy() - center
     enum_idx, kid = 0, cfg.cam_id
+    fp_frame_to_idx = {str(f): i for i, f in enumerate(fp_frames)}
+    save_dir_abs = osp.abspath(str(getattr(cfg, "save_dir", "experiments")))
+    marker = f"{os.sep}data{os.sep}finetune_ckpts"
+    if marker in save_dir_abs:
+        exp_root = save_dir_abs.split(marker)[0]
+    else:
+        exp_root = osp.join(save_dir_abs, str(getattr(cfg, "exp_name", "debug")))
+    frame_cache_dir = osp.join(exp_root, "data", "rgbd_frame_cache", seq_name, f"cam{kid}")
+    _ensure_rgbd_frame_cache(
+        frame_cache_dir=frame_cache_dir,
+        fp_frames=fp_frames,
+        controllers=controllers,
+        kids=kids,
+        enum_idx=enum_idx,
+        fps=float(getattr(args, "fps", 30)),
+    )
     nlf_data = joblib.load(f"{cfg.nlf_root}/{video_prefix}_params.pkl")
 
     packed = None
@@ -495,6 +566,8 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
 
     partial.kid = kid
     partial.enum_idx = enum_idx
+    partial.fp_frame_to_idx = fp_frame_to_idx
+    partial.frame_cache_dir = frame_cache_dir
     partial.kids = kids
     partial.packed = packed
     partial.nlf_data = nlf_data
@@ -604,12 +677,14 @@ def horefine_vis_window_load_rgb_masks_depth(
     tar_mask_for_samples: Any,
     video_prefix: str,
     kid: int,
-    controllers: list,
+    controllers: Optional[list],
     kids: list,
     render_size: tuple,
     focal: np.ndarray,
     principal_point: np.ndarray,
     K_full: np.ndarray,
+    fp_frame_to_idx: Optional[dict[str, int]] = None,
+    frame_cache_dir: Optional[str] = None,
     tqdm_frames: bool = False,
 ) -> tuple[list, list, list, list, list, list, list]:
     input_rgbms, input_xyzs, bboxes = [], [], []
@@ -620,10 +695,15 @@ def horefine_vis_window_load_rgb_masks_depth(
     itr = tqdm(range(start, end)) if tqdm_frames else range(start, end)
     for i in itr:
         frame_time = frames_packed[i]
-        if frame_time not in fp_frames:
+        if fp_frame_to_idx is not None:
+            idx_fp = fp_frame_to_idx.get(str(frame_time), -1)
+        elif frame_time in fp_frames:
+            idx_fp = fp_frames.index(frame_time)
+        else:
+            idx_fp = -1
+        if idx_fp < 0:
             print(f"Frame {frame_time} not found in FP frames!")
             continue
-        idx_fp = fp_frames.index(frame_time)
         frames_used.append(f"{seq_name}/{frame_time}")
         pose_fp = np.matmul(fp_poses[idx_fp, enum_idx], gt_to_perturb_pose)
         if callable(getattr(tar_mask_for_samples, "get_masks", None)):
@@ -638,13 +718,15 @@ def horefine_vis_window_load_rgb_masks_depth(
         top_left = center_2d - radius
         bottom_right = center_2d + radius
         K_roi = _horefine_kroi_from_corners(bottom_right, top_left, render_size, focal, principal_point)
-        t = float(frame_time[1:])
-        actual_times = np.array([controllers[x].get_closest_time(t) for x, _ in enumerate(kids)])
-        best_kid = np.argmin(np.abs(actual_times - t))
-        actual_time = actual_times[best_kid]
-        color, depth = controllers[enum_idx].get_closest_frame(actual_time)
-        full_colors.append(np.asarray(color))
-        color_np = np.asarray(color, dtype=np.uint8)
+        if frame_cache_dir is None or not osp.isdir(frame_cache_dir):
+            raise FileNotFoundError(
+                f"RGBD frame cache directory missing for getitem: {frame_cache_dir}"
+            )
+        cache_fp = _frame_cache_file(frame_cache_dir, idx_fp)
+        if not osp.isfile(cache_fp):
+            raise FileNotFoundError(f"RGBD frame cache file missing for getitem: {cache_fp}")
+        color_np, depth = _load_cached_rgbd_frame(frame_cache_dir, idx_fp)
+        full_colors.append(np.asarray(color_np))
         mask_h_np = mask_h.astype(np.uint8)
         mask_o_np = mask_o.astype(np.uint8)
         color = np.concatenate([color_np, mask_h_np[:, :, None], mask_o_np[:, :, None]], axis=-1)
@@ -913,6 +995,8 @@ def horefine_vis_rebuild_independent_window_batch(
     vis_input = ctx.vis_input
     vw_input = ctx.vw_input
     record_indie_vis = getattr(ctx, "record_independent_vis", False)
+    fp_frame_to_idx = getattr(ctx, "fp_frame_to_idx", None)
+    frame_cache_dir = getattr(ctx, "frame_cache_dir", None)
 
     # Prefer independent mask source. For MP4 readers, use a fresh instance per getitem
     # so repeated calls with the same [start, end] never hit backward frame access.
@@ -957,12 +1041,11 @@ def horefine_vis_rebuild_independent_window_batch(
         trans_nlf_init = nlf_data["transls"][nlf_inds, enum_idx].astype(np.float32)
         betas_nlf_init = nlf_data["betas"][:, enum_idx].copy()
 
-    # Kinect readers are forward-only; main ``run_1seq`` already advanced ``ctx.controllers``.
-    # Mirror ``prepare_video_mask_loader`` / ``init_video_controllers`` with fresh instances (same as reopening videos).
-    video_in = getattr(args, "video", None)
-    if not video_in:
-        raise RuntimeError("horefine_vis: args.video is required to reload RGB/depth for independent batch")
-    controllers_reload, _ = init_video_controllers(args, video_in, kids)
+    controllers_reload: Optional[list] = None
+    if frame_cache_dir is None or not osp.isdir(frame_cache_dir):
+        raise FileNotFoundError(
+            f"getitem requires prebuilt RGBD cache, but directory is missing: {frame_cache_dir}"
+        )
     try:
         input_rgbms, input_xyzs, bboxes, K_rois, poses_perturbed, frames_used, _fc = (
             horefine_vis_window_load_rgb_masks_depth(
@@ -983,6 +1066,8 @@ def horefine_vis_rebuild_independent_window_batch(
                 focal=focal,
                 principal_point=principal_point,
                 K_full=K_full,
+                fp_frame_to_idx=fp_frame_to_idx,
+                frame_cache_dir=frame_cache_dir,
                 tqdm_frames=False,
             )
         )
@@ -1032,10 +1117,11 @@ def horefine_vis_rebuild_independent_window_batch(
             betas_nlf_init=betas_nlf_init,
         )
     finally:
-        for _c in controllers_reload:
-            _close = getattr(_c, "close", None)
-            if callable(_close):
-                _close()
+        if controllers_reload is not None:
+            for _c in controllers_reload:
+                _close = getattr(_c, "close", None)
+                if callable(_close):
+                    _close()
 
 
 class HoRefineVisBatchLoader:
