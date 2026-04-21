@@ -859,10 +859,6 @@ def horefine_vis_window_render_and_make_batch(
         "delta_transl": delta_transl,
         
         ## Meta
-        "nlf_rotmat": prep["nlf_rotmat"],
-        "nlf_transl": prep["nlf_transl"],
-
-        
         "mesh_diameter": mesh_diam_tensor,
         "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),
         
@@ -871,8 +867,8 @@ def horefine_vis_window_render_and_make_batch(
         "full_hw": full_hw,
         "frames_used": list(frames_used),
         "full_colors": [np.asarray(x).copy() for x in full_colors],
-        
     }
+    
     return batch
 
 
