@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 import cv2
-import h5py
 import joblib
 import kornia
 import numpy as np
@@ -18,7 +17,6 @@ from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 
 import Utils
-from behave_data.behave_video import load_masks
 from behave_data.utils import init_video_controllers
 from tools import img_utils
 from Utils import load_smpl_obj_uvmap
@@ -188,21 +186,35 @@ class _MP4MaskLoader:
 def _horefine_prepare_video_mask_loader(args: Any, kids: list, video_prefix: str, cfg: Any) -> tuple[list, Any]:
     args.nodepth = False
     controllers, _ = init_video_controllers(args, args.video, kids)
+    masks_root = str(_cfg_get(cfg, "masks_root", ""))
     human_mask_mp4 = None
     object_mask_mp4 = None
-    masks_root = str(_cfg_get(cfg, "masks_root", ""))
     if "," in masks_root:
         left, right = masks_root.split(",", 1)
         if left.strip().lower().endswith(".mp4") and right.strip().lower().endswith(".mp4"):
             human_mask_mp4 = left.strip()
             object_mask_mp4 = right.strip()
-    if human_mask_mp4 and object_mask_mp4:
-        print(f"loading masks from mp4: {human_mask_mp4}, {object_mask_mp4}")
-        tar_mask = _MP4MaskLoader(human_mask_mp4, object_mask_mp4, fps=float(getattr(args, "fps", 30)))
     else:
-        h5_path = f'{_cfg_get(cfg, "masks_root")}/{video_prefix}_masks_k{args.cam_id}.h5'
-        print(f"loading masks from {h5_path}")
-        tar_mask = h5py.File(h5_path, "r")
+        # MP4-only mode: prefer explicit files in masks_root directory, then near input video.
+        if masks_root:
+            hm = osp.join(masks_root, "human_mask.mp4")
+            om = osp.join(masks_root, "object_mask.mp4")
+            if osp.isfile(hm) and osp.isfile(om):
+                human_mask_mp4, object_mask_mp4 = hm, om
+        if human_mask_mp4 is None or object_mask_mp4 is None:
+            base = osp.dirname(str(args.video))
+            hm = osp.join(base, "human_mask.mp4")
+            om = osp.join(base, "object_mask.mp4")
+            if osp.isfile(hm) and osp.isfile(om):
+                human_mask_mp4, object_mask_mp4 = hm, om
+    if human_mask_mp4 is None or object_mask_mp4 is None:
+        raise FileNotFoundError(
+            "MP4 mask files are required. Set cfg.masks_root to "
+            "'/path/human_mask.mp4,/path/object_mask.mp4' or provide files named "
+            "'human_mask.mp4' and 'object_mask.mp4' in masks_root/ or video directory."
+        )
+    print(f"loading masks from mp4: {human_mask_mp4}, {object_mask_mp4}")
+    tar_mask = _MP4MaskLoader(human_mask_mp4, object_mask_mp4, fps=float(getattr(args, "fps", 30)))
     return controllers, tar_mask
 
 
@@ -248,7 +260,13 @@ def _ensure_rgbd_frame_cache(
                     os.remove(osp.join(frame_cache_dir, fn))
                 except OSError:
                     pass
-    for idx, frame_time in enumerate(fp_frames):
+    itr = tqdm(
+        enumerate(fp_frames),
+        total=len(fp_frames),
+        desc=f"[cache] rgbd cam{enum_idx}",
+        leave=False,
+    )
+    for idx, frame_time in itr:
         cache_fp = _frame_cache_file(frame_cache_dir, idx)
         if osp.isfile(cache_fp):
             continue
@@ -258,6 +276,65 @@ def _ensure_rgbd_frame_cache(
         actual_time = actual_times[best_kid]
         color, depth = controllers[enum_idx].get_closest_frame(actual_time)
         np.savez_compressed(cache_fp, color=np.asarray(color, dtype=np.uint8), depth=np.asarray(depth))
+    with open(meta_fp, "w") as f:
+        json.dump({"version": cache_version, "num_frames": int(len(fp_frames))}, f)
+
+
+def _mask_cache_file(mask_cache_dir: str, idx: int) -> str:
+    return osp.join(mask_cache_dir, f"{idx:06d}.npz")
+
+
+def _mask_cache_meta_file(mask_cache_dir: str) -> str:
+    return osp.join(mask_cache_dir, "_meta.json")
+
+
+def _load_cached_masks(mask_cache_dir: str, idx: int) -> tuple[np.ndarray, np.ndarray]:
+    with np.load(_mask_cache_file(mask_cache_dir, idx)) as d:
+        return d["mask_h"], d["mask_o"]
+
+
+def _ensure_mask_frame_cache(
+    *,
+    mask_cache_dir: str,
+    fp_frames: list,
+    mask_loader: _MP4MaskLoader,
+) -> None:
+    cache_version = 1
+    os.makedirs(mask_cache_dir, exist_ok=True)
+    meta_fp = _mask_cache_meta_file(mask_cache_dir)
+    rebuild_cache = True
+    if osp.isfile(meta_fp):
+        try:
+            meta = json.load(open(meta_fp, "r"))
+            rebuild_cache = not (
+                int(meta.get("version", -1)) == cache_version
+                and int(meta.get("num_frames", -1)) == int(len(fp_frames))
+            )
+        except Exception:
+            rebuild_cache = True
+    if rebuild_cache:
+        for fn in os.listdir(mask_cache_dir):
+            if fn.endswith(".npz") or fn == "_meta.json":
+                try:
+                    os.remove(osp.join(mask_cache_dir, fn))
+                except OSError:
+                    pass
+    itr = tqdm(
+        enumerate(fp_frames),
+        total=len(fp_frames),
+        desc="[cache] masks",
+        leave=False,
+    )
+    for idx, frame_time in itr:
+        cache_fp = _mask_cache_file(mask_cache_dir, idx)
+        if osp.isfile(cache_fp):
+            continue
+        mask_h, mask_o = mask_loader.get_masks(str(frame_time))
+        np.savez_compressed(
+            cache_fp,
+            mask_h=np.asarray(mask_h, dtype=np.uint8),
+            mask_o=np.asarray(mask_o, dtype=np.uint8),
+        )
     with open(meta_fp, "w") as f:
         json.dump({"version": cache_version, "num_frames": int(len(fp_frames))}, f)
 
@@ -511,6 +588,7 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
     else:
         exp_root = osp.join(save_dir_abs, str(getattr(cfg, "exp_name", "debug")))
     frame_cache_dir = osp.join(exp_root, "data", "rgbd_frame_cache", seq_name, f"cam{kid}")
+    mask_cache_dir = osp.join(exp_root, "data", "mask_frame_cache", seq_name, f"cam{kid}")
     _ensure_rgbd_frame_cache(
         frame_cache_dir=frame_cache_dir,
         fp_frames=fp_frames,
@@ -518,6 +596,11 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
         kids=kids,
         enum_idx=enum_idx,
         fps=float(getattr(args, "fps", 30)),
+    )
+    _ensure_mask_frame_cache(
+        mask_cache_dir=mask_cache_dir,
+        fp_frames=fp_frames,
+        mask_loader=tar_mask.fork(),
     )
     nlf_data = joblib.load(f"{cfg.nlf_root}/{video_prefix}_params.pkl")
 
@@ -568,6 +651,7 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
     partial.enum_idx = enum_idx
     partial.fp_frame_to_idx = fp_frame_to_idx
     partial.frame_cache_dir = frame_cache_dir
+    partial.mask_cache_dir = mask_cache_dir
     partial.kids = kids
     partial.packed = packed
     partial.nlf_data = nlf_data
@@ -685,6 +769,7 @@ def horefine_vis_window_load_rgb_masks_depth(
     K_full: np.ndarray,
     fp_frame_to_idx: Optional[dict[str, int]] = None,
     frame_cache_dir: Optional[str] = None,
+    mask_cache_dir: Optional[str] = None,
     tqdm_frames: bool = False,
 ) -> tuple[list, list, list, list, list, list, list]:
     input_rgbms, input_xyzs, bboxes = [], [], []
@@ -706,10 +791,14 @@ def horefine_vis_window_load_rgb_masks_depth(
             continue
         frames_used.append(f"{seq_name}/{frame_time}")
         pose_fp = np.matmul(fp_poses[idx_fp, enum_idx], gt_to_perturb_pose)
-        if callable(getattr(tar_mask_for_samples, "get_masks", None)):
-            mask_h, mask_o = tar_mask_for_samples.get_masks(frame_time)
-        else:
-            mask_h, mask_o = load_masks(video_prefix, frame_time, kid, tar_mask_for_samples)
+        if mask_cache_dir is None or not osp.isdir(mask_cache_dir):
+            raise FileNotFoundError(
+                f"Mask frame cache directory missing for getitem: {mask_cache_dir}"
+            )
+        mask_cache_fp = _mask_cache_file(mask_cache_dir, idx_fp)
+        if not osp.isfile(mask_cache_fp):
+            raise FileNotFoundError(f"Mask frame cache file missing for getitem: {mask_cache_fp}")
+        mask_h, mask_o = _load_cached_masks(mask_cache_dir, idx_fp)
         if mask_h is None:
             continue
         bmin, bmax = img_utils.masks2bbox([mask_h, mask_o])
@@ -997,6 +1086,7 @@ def horefine_vis_rebuild_independent_window_batch(
     record_indie_vis = getattr(ctx, "record_independent_vis", False)
     fp_frame_to_idx = getattr(ctx, "fp_frame_to_idx", None)
     frame_cache_dir = getattr(ctx, "frame_cache_dir", None)
+    mask_cache_dir = getattr(ctx, "mask_cache_dir", None)
 
     # Prefer independent mask source. For MP4 readers, use a fresh instance per getitem
     # so repeated calls with the same [start, end] never hit backward frame access.
@@ -1068,6 +1158,7 @@ def horefine_vis_rebuild_independent_window_batch(
                 K_full=K_full,
                 fp_frame_to_idx=fp_frame_to_idx,
                 frame_cache_dir=frame_cache_dir,
+                mask_cache_dir=mask_cache_dir,
                 tqdm_frames=False,
             )
         )
