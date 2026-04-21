@@ -512,7 +512,9 @@ class DINOTempHORefineDeltaAndAbs(DINOTempRefineNet):
         return b, rot_delta_gt, t, trans_delta_gt
 
     def get_body_joints(self, batch):
-        joints_body = batch['hum_joints_init']
+        joints_body = batch.get('hum_joints_init', None)
+        if joints_body is None:
+            joints_body = batch.get('joints_nlf', None)
         return joints_body
 
     def pred_head_forward(self, x, batch, B):

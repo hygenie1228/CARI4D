@@ -120,7 +120,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
             end = min(start + clip_len, total_frames)
             
             batch = vis_batch_loader.getitem(start, end)
-            obj_pose_init_np = batch['obj_pose_init'][0].detach().cpu().numpy()
             H_full, W_full = batch["full_hw"]
             frames_used = batch["frames_used"]
             full_colors = batch["full_colors"]
@@ -194,7 +193,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
             pred_smpl_pose = pose72to156(pred_smpl_pose)
 
             # still use the old NLF translation
-            verts_init = body_model(hum_pose_init, hum_betas_init, hum_trans_init)[0].cpu().numpy()
+            verts_init = body_model(hum_pose_init, hum_betas_init, hum_trans_init)[0]
             verts_pred = body_model(pred_smpl_pose, pred_betas, pred_smpl_t)[0].cpu().numpy()
 
         
@@ -235,12 +234,14 @@ class HORefineRunner(BehaveFPNLFRenderer):
             # HERE
             mtx_front, rend_pr, rend_pr_side, view_mat = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_pr)
 
-            # TODO: Render input
-            verts_obj_batch = [
-                np.matmul(verts_obj_base, pose_fp[:3, :3].T) + pose_fp[:3, 3]
-                for pose_fp in obj_pose_init_np
-            ]
-            verts_comb_in = torch.from_numpy(np.concatenate([verts_init, np.stack(verts_obj_batch)], 1)).float().to(device)  # (T, N_total, 3)
+            # Render input with the same object-centering path as pred/gt for front/side consistency.
+            R_init = poseA[0, :, :3, :3].to(device).float()
+            t_init = poseA[0, :, :3, 3].to(device).float()
+            obj_verts_in = torch.matmul(
+                obj_base_centered[None].expand(end - start, -1, -1),
+                R_init.permute(0, 2, 1),
+            ) + t_init[:, None]
+            verts_comb_in = torch.cat([verts_init, obj_verts_in], dim=1)  # (T, N_total, 3)
             _, rend_in, rend_in_side, _ = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_in)
 
             files = frames_used
@@ -258,7 +259,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
             data_gt['smpl_t'].append(hum_trans_gt.reshape(-1, 3))
             data_gt['betas'].append(hum_betas_gt.reshape(-1, 10))
             data_pr['verts'].append(verts_pr)
-            data_in['verts'].append(torch.from_numpy(verts_init).to(device).float())
+            data_in['verts'].append(verts_init)
 
             # add contact logits
             if 'contact' in output:
