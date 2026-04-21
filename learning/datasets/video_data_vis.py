@@ -843,6 +843,7 @@ def horefine_vis_window_render_and_make_batch(
         "input_xyz": torch.stack(input_xyz_final, 0).float().cuda()[None],
         "render_xyz": torch.stack(render_xyz, 0).float().cuda()[None],
         
+        ## Init
         "hum_pose_init": hum_pose_init,
         "hum_transl_init": hum_transl_init,
         "hum_betas_init": hum_betas_init,
@@ -861,7 +862,6 @@ def horefine_vis_window_render_and_make_batch(
         ## Meta
         "mesh_diameter": mesh_diam_tensor,
         "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),
-        
         "K_rois": torch.from_numpy(np.stack(K_rois)).float().cuda()[None],
         "bboxes": np.stack(bboxes).astype(np.float32),
         "full_hw": full_hw,

@@ -1649,25 +1649,34 @@ class Trainer(object):
 
     def smpl_params_from_pred(self, batch, out_dict):
         "compute SMPL parameters from prediction, return in shape (BT, ...)"
-        J, bid = 24, 0
-        clip_len = self.cfg.clip_len
-        bs = len(batch['nlf_transl'])
+        J = 24
         if self.cfg.loss_type in ['l2-absrot-delta-humabs', 'l1-absrot-delta-humabs']:
             # predict abs pose already
             pred_smpl_r = out_dict['body_rotmat']
             pred_smpl_t = out_dict['body_transl']
         else:
             # additional visualization for human as well
-            nlf_poses = batch['nlf_rotmat'].reshape(-1, J, 3, 3)  # B, T, J, 3, 3,
-            pred_smpl_t = batch['nlf_transl'].reshape(-1, 3) # + out_dict['hum_trans']
+            # Prefer hum_*_init keys (video_data_vis / run_horefine path),
+            # keep nlf_* fallback for legacy training datasets.
+            if 'hum_pose_init' in batch:
+                hum_pose_init = batch['hum_pose_init'].reshape(-1, 52, 3)[:, :J]  # (BT, 24, 3)
+                nlf_poses = so3_exp_map(hum_pose_init.reshape(-1, 3)).reshape(-1, J, 3, 3)
+            else:
+                nlf_poses = batch['nlf_rotmat'].reshape(-1, J, 3, 3)  # B, T, J, 3, 3
+
+            if 'hum_transl_init' in batch:
+                pred_smpl_t = batch['hum_transl_init'].reshape(-1, 3)
+            else:
+                pred_smpl_t = batch['nlf_transl'].reshape(-1, 3) # + out_dict['hum_trans']
             delta_pr_r = geom_utils.rot6d_to_rotmat(out_dict['hum_pose'].reshape(-1, 6)).reshape(-1, J, 3, 3)
 
             pred_smpl_r = delta_pr_r @ nlf_poses
         pred_smpl_pose = geom_utils.rotation_matrix_to_angle_axis(pred_smpl_r.reshape(-1, 3, 3)).reshape(-1, J * 3)
+        betas_base = batch['hum_betas_init'] if 'hum_betas_init' in batch else batch['betas_nlf']
         if 'hum_shape' in out_dict:
-            betas = out_dict['hum_shape'] + batch['betas_nlf'].reshape(-1, 10)
+            betas = out_dict['hum_shape'] + betas_base.reshape(-1, 10)
         else:
-            betas = batch['betas_nlf'].reshape(-1, 10) # use predicted NLF betas
+            betas = betas_base.reshape(-1, 10) # use initial human betas
         return betas, pred_smpl_pose, pred_smpl_r, pred_smpl_t
 
     @staticmethod

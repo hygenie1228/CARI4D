@@ -131,14 +131,12 @@ class HORefineRunner(BehaveFPNLFRenderer):
             hum_pose_init = batch['hum_pose_init'][0].float().to(device)
             hum_betas_init = batch['hum_betas_init'][0].float().to(device)
             hum_trans_init = batch['hum_transl_init'][0].float().to(device)
-            
+            obj_pose_init = batch['obj_pose_init'][0].float().to(device)
             
             # GT params
             hum_pose_gt = batch['hum_pose_gt'][0].float().to(device)
             hum_betas_gt = batch['hum_betas_gt'][0].float().to(device)
             hum_trans_gt = batch['hum_transl_gt'][0].float().to(device)
-
-            obj_pose_init = batch['obj_pose_init'][0].float().to(device)
             obj_pose_gt = batch['obj_pose_gt'][0].float().to(device)
 
 
@@ -532,47 +530,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
         rend_batch_side = Utils.nvdiff_rasterize(glctx, mesh_tensors, pos_clip_side, (H, W))
         rend_batch_side = (rend_batch_side * 255).byte().cpu().numpy()
         return mtx_front, rend_batch, rend_batch_side, view_mat
-
-    def render_front_side_Ks(self, H, W, Ks, glctx, mesh_tensors, verts_comb_pr):
-        "Like render_front_side but Ks is (T,3,3) intrinsics per frame (training ROI crops can differ per t)."
-        device = verts_comb_pr.device
-        T = len(verts_comb_pr)
-        mats = [
-            Utils.projection_matrix_from_intrinsics(Ks[j], height=H, width=W, znear=0.001, zfar=100).reshape(4, 4)
-            for j in range(T)
-        ]
-        projection_mat = torch.as_tensor(np.stack(mats, axis=0), device=device, dtype=torch.float)
-        ob_in_glcams = torch.tensor(Utils.glcam_in_cvcam, device=device, dtype=torch.float).reshape(1, 4, 4)
-        mtx_front = projection_mat @ ob_in_glcams
-        pos_homo = Utils.to_homo_torch(verts_comb_pr)
-        pos_clip = (mtx_front[:, None] @ pos_homo[..., None])[..., 0]
-        rend_batch = Utils.nvdiff_rasterize(glctx, mesh_tensors, pos_clip, (H, W))
-        rend_batch = (rend_batch * 255).byte().cpu().numpy()
-        if self.side_view_z is None:
-            self.side_view_z = torch.mean(verts_comb_pr[:, :, 2])
-        z_now = torch.mean(verts_comb_pr[:, :, 2])
-        if abs(z_now - self.side_view_z) > 1.0:
-            self.side_view_z = z_now
-        z = self.side_view_z
-        at = torch.tensor([[0.0, 0.0, z]], device=device, dtype=torch.float)
-        Rv, Tv = look_at_view_transform(dist=z * 1.3, elev=0, azim=75, at=at, up=((0, 1, 0),), device=device)
-        view_mat = torch.eye(4, device=device, dtype=torch.float)
-        view_mat[:3, :3] = Rv[0]
-        view_mat[:3, 3] = Tv[0]
-        verts_pr_side = torch.matmul(verts_comb_pr, view_mat[:3, :3]) + view_mat[:3, 3]
-        pos_homo_side = Utils.to_homo_torch(verts_pr_side)
-        pos_clip_side = (mtx_front[:, None] @ pos_homo_side[..., None])[..., 0]
-        rend_batch_side = Utils.nvdiff_rasterize(glctx, mesh_tensors, pos_clip_side, (H, W))
-        rend_batch_side = (rend_batch_side * 255).byte().cpu().numpy()
-        return mtx_front, rend_batch, rend_batch_side, view_mat
-
-
-def _mesh_tensors_to_device(mesh_tensors: dict, device: torch.device) -> dict:
-    "load_smpl_obj_uvmap returns CPU/cuda tensors; align with trainer device."
-    out = {}
-    for k, v in mesh_tensors.items():
-        out[k] = v.to(device) if torch.is_tensor(v) else v
-    return out
 
 
 def main():
