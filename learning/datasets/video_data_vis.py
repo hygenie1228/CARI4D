@@ -846,9 +846,9 @@ def horefine_vis_window_render_and_make_batch(
         "hum_pose_init": hum_pose_init,
         "hum_transl_init": hum_transl_init,
         "hum_betas_init": hum_betas_init,
+        "hum_joints_init": prep["joints_nlf"],
         "obj_pose_init": pose_perturbed_tensor,
-        # "poseA_norm": torch.from_numpy(poseA_norm).float().cuda()[None],
-
+        
         ## Target
         "hum_pose_gt": hum_pose_gt,
         "hum_betas_gt": hum_betas_gt,
@@ -859,11 +859,10 @@ def horefine_vis_window_render_and_make_batch(
         "delta_transl": delta_transl,
         
         ## Meta
-        "joints_nlf": prep["joints_nlf"],
         "nlf_rotmat": prep["nlf_rotmat"],
         "nlf_transl": prep["nlf_transl"],
 
-        "B_in_cams_init": B_in_cams.copy(),
+        
         "mesh_diameter": mesh_diam_tensor,
         "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),
         

@@ -1,11 +1,3 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
-
 import json
 import os, sys
 import re
@@ -39,115 +31,6 @@ from learning.training.trainer import Trainer
 from learning.datasets.video_data_vis import HoRefineVisBatchLoader
 from lib_smpl import pose156to72, pose72to156, SMPL_ASSETS_ROOT
 import h5py
-
-
-def normalized_trans_delta_gt_from_batch(batch: dict, cfg: Any) -> torch.Tensor:
-    """Object translation delta GT in the same normalized (BT, 3) space as ``Trainer.forward_batch``.
-
-    Mirrors ``trans_delta_gt`` derivation without running the model.
-    """
-    trans_delta_gt = batch["delta_transl"].clone()
-    mesh_radius = batch["mesh_diameter"] / 2.0
-    trans_normalizer = batch["trans_normalizer"]
-    B, T = trans_delta_gt.shape[:2]
-    if cfg["normalize_xyz"]:
-        trans_delta_gt = trans_delta_gt * (1.0 / mesh_radius.reshape(len(trans_delta_gt), T, -1))
-    else:
-        trans_delta_gt = trans_delta_gt / trans_normalizer
-    return trans_delta_gt.reshape(B * T, 3)
-
-
-def collated_batch_item_for_delta_gt(batch: dict, bid: int = 0) -> dict:
-    """One element from a collated train batch: (B,T,·) -> (1,T,·) for delta GT normalization."""
-    dt = batch["delta_transl"]
-    if dt.shape[0] <= bid:
-        raise IndexError(f"batch index {bid} out of range for B={dt.shape[0]}")
-    out = dict(batch)
-    out["delta_transl"] = batch["delta_transl"][bid : bid + 1].clone()
-    out["mesh_diameter"] = batch["mesh_diameter"][bid : bid + 1].clone()
-    out["trans_normalizer"] = batch["trans_normalizer"][bid : bid + 1].clone()
-    for k in ("pose_perturbed", "pose_gt", "poseA_norm", "frame_mask"):
-        t = batch.get(k)
-        if torch.is_tensor(t) and t.shape[0] > bid:
-            out[k] = t[bid : bid + 1].clone()
-    return out
-
-
-def diagnose_trans_delta_gt_batch_diff(
-    batch_render: dict,
-    batch_train_item: dict,
-    cfg: Any,
-    prefix: str = "[run_1seq delta-gt diag]",
-) -> None:
-    """Explain differences in inputs to ``normalized_trans_delta_gt_from_batch`` (render vs train batch[0])."""
-    dev = torch.device("cpu")
-
-    def _f(x: torch.Tensor) -> torch.Tensor:
-        return x.detach().float().to(dev)
-
-    for k in ("delta_transl", "mesh_diameter", "trans_normalizer"):
-        if k not in batch_render or k not in batch_train_item:
-            print(f"{prefix} missing key {k!r} in one of the batches")
-            continue
-        a, b = _f(batch_render[k]), _f(batch_train_item[k])
-        if a.shape != b.shape:
-            print(f"{prefix} {k}: shape render {tuple(a.shape)} vs train {tuple(b.shape)}")
-            continue
-        d = (a - b).abs()
-        print(
-            f"{prefix} {k}: max_abs={float(d.max().item()):.6e} "
-            f"mean_abs={float(d.mean().item()):.6e}"
-        )
-
-    for pk in ("pose_perturbed", "pose_gt"):
-        if pk not in batch_render or pk not in batch_train_item:
-            continue
-        a = _f(batch_render[pk][:, :, :3, 3])
-        b = _f(batch_train_item[pk][:, :, :3, 3])
-        if a.shape != b.shape:
-            print(f"{prefix} {pk} translation: shape {tuple(a.shape)} vs {tuple(b.shape)}")
-            continue
-        d = (a - b).abs()
-        print(
-            f"{prefix} {pk} t_cam: max_abs={float(d.max().item()):.6e} "
-            f"mean_abs={float(d.mean().item()):.6e}"
-        )
-
-    # Isolate delta vs diameter scaling (normalize_xyz path).
-    dt_r = _f(batch_render["delta_transl"])
-    dt_t = _f(batch_train_item["delta_transl"])
-    mr_r = _f(batch_render["mesh_diameter"]) / 2.0
-    mr_t = _f(batch_train_item["mesh_diameter"]) / 2.0
-    if dt_r.shape != dt_t.shape or mr_r.shape != mr_t.shape:
-        return
-    B, T = dt_r.shape[:2]
-    if bool(cfg["normalize_xyz"]):
-        norm_r = (dt_r * (1.0 / mr_r.reshape(B, T, -1))).reshape(-1, 3)
-        norm_t = (dt_t * (1.0 / mr_t.reshape(B, T, -1))).reshape(-1, 3)
-        cross_r_delta = (dt_r * (1.0 / mr_t.reshape(B, T, -1))).reshape(-1, 3)
-        cross_t_delta = (dt_t * (1.0 / mr_r.reshape(B, T, -1))).reshape(-1, 3)
-        print(
-            f"{prefix} normalized GT: max|render-train|={(norm_r - norm_t).abs().max().item():.6e}"
-        )
-        print(
-            f"{prefix}  swap test: render delta + train diameter -> max|...-train_norm|="
-            f"{(cross_r_delta - norm_t).abs().max().item():.6e} "
-            f"(large => raw delta_transl differs)"
-        )
-        print(
-            f"{prefix}  swap test: train delta + render diameter -> max|...-render_norm|="
-            f"{(cross_t_delta - norm_r).abs().max().item():.6e} "
-            f"(large => raw delta_transl differs)"
-        )
-    else:
-        tn_r = _f(batch_render["trans_normalizer"])
-        tn_t = _f(batch_train_item["trans_normalizer"])
-        norm_r = (dt_r / tn_r).reshape(-1, 3)
-        norm_t = (dt_t / tn_t).reshape(-1, 3)
-        print(
-            f"{prefix} normalized GT (÷trans_normalizer): max|render-train|="
-            f"{(norm_r - norm_t).abs().max().item():.6e}"
-        )
 
 
 class HORefineRunner(BehaveFPNLFRenderer):
@@ -226,7 +109,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
 
         # Stats for in-run comparison logging in trainer.
         loss_t_eval_vals = []
-        loss_t_eval_vals2 = []
         loss_r_eval_vals = []
         loss_hum_r_vals = []
         gt_fps = []
@@ -238,7 +120,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
             end = min(start + clip_len, total_frames)
             
             batch = vis_batch_loader.getitem(start, end)
-            B_in_cams_init = batch['B_in_cams_init']
+            obj_pose_init_np = batch['obj_pose_init'][0].detach().cpu().numpy()
             H_full, W_full = batch["full_hw"]
             frames_used = batch["frames_used"]
             full_colors = batch["full_colors"]
@@ -268,9 +150,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
             batch_model["betas_nlf"] = batch['hum_betas_init']
             batch_model["nlf_poses"] = batch['hum_pose_init']
 
-            mb0 = collated_batch_item_for_delta_gt(batch, bid=0)
-            trans_delta_gt2 = normalized_trans_delta_gt_from_batch(mb0, cfg)
-
             # import pdb; pdb.set_trace() # do not remove !!!(for debugging)
             rot, rot_delta_gt, trans_delta_gt, trans_delta_pred, output = trainer.forward_batch(batch_model, cfg,
                                                                                                 trainer.model,
@@ -285,9 +164,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
             bs, ts = fm.shape[:2]
             loss_t_eval_vals.append(
                 float((torch.abs(trans_delta_pred - trans_delta_gt).reshape(bs, ts, -1) * fm).mean().item())
-            )
-            loss_t_eval_vals2.append(
-                float((torch.abs(trans_delta_pred - trans_delta_gt2).reshape(bs, ts, -1) * fm).mean().item())
             )
             loss_func_v = F.l1_loss if 'l1' in str(cfg.loss_type) else F.mse_loss
             loss_r_eval_vals.append(
@@ -360,7 +236,10 @@ class HORefineRunner(BehaveFPNLFRenderer):
             mtx_front, rend_pr, rend_pr_side, view_mat = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_pr)
 
             # TODO: Render input
-            verts_obj_batch = [np.matmul(verts_obj_base, pose_fp[:3, :3].T) + pose_fp[:3, 3] for pose_fp in B_in_cams_init]
+            verts_obj_batch = [
+                np.matmul(verts_obj_base, pose_fp[:3, :3].T) + pose_fp[:3, 3]
+                for pose_fp in obj_pose_init_np
+            ]
             verts_comb_in = torch.from_numpy(np.concatenate([verts_init, np.stack(verts_obj_batch)], 1)).float().to(device)  # (T, N_total, 3)
             _, rend_in, rend_in_side, _ = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_in)
 
@@ -429,7 +308,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
                     color = cv2.resize(full_colors[j], (W, H))
                     in_comb = self.comb_front_side(color, rend_in[j], rend_in_side[j])
                     pr_comb = self.comb_front_side(color, rend_pr[j], rend_pr_side[j])
-                    rgb_comb = self.comb_front_side(color, color, torch.zeros_like(color))
+                    rgb_comb = self.comb_front_side(color, color, np.ones_like(color)*127)
                     combs = [rgb_comb]
                     bid = 0
 
@@ -503,8 +382,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
                         gt_side = rend_gt_side[j][y1:y2, x1:x2]
 
                     comb = np.concatenate(combs, axis=1)
-                    cv2.putText(comb, frame_time+ f' idx {j+start}', (comb.shape[1] // 4, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
-                                (0, 255, 255), 2)
+                    cv2.putText(comb, frame_time+ f' idx {j+start}', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+                                (0, 255, 255), 4)
 
                     vw.append_data(comb)
             finally:
@@ -521,7 +400,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
         print(f'result saved to {pth_file}')
         # Loss/metrics from the exact prediction used right before visualization rendering.
         loss_t_viz_render = (float(loss_t_eval_vals[-1]) if len(loss_t_eval_vals) > 0 else None)
-        loss_t_viz_render2 = (float(loss_t_eval_vals2[-1]) if len(loss_t_eval_vals2) > 0 else None)
         loss_r_viz_render = (float(loss_r_eval_vals[-1]) if len(loss_r_eval_vals) > 0 else None)
         loss_hum_r_viz_render = (float(loss_hum_r_vals[-1]) if len(loss_hum_r_vals) > 0 else None)
 
@@ -591,7 +469,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
             "loss_r_viz": loss_r_viz,
             "loss_hum_r_viz": loss_hum_r_viz,
             "loss_t_viz_render": loss_t_viz_render,
-            "loss_t_viz_render2": loss_t_viz_render2,
             "loss_r_viz_render": loss_r_viz_render,
             "loss_hum_r_viz_render": loss_hum_r_viz_render,
             "loss_t_viz_metric_batch": loss_t_viz_metric_batch,
