@@ -41,56 +41,6 @@ from lib_smpl import pose156to72, pose72to156, SMPL_ASSETS_ROOT
 import h5py
 
 
-class MP4MaskLoader:
-    def __init__(self, human_mask_mp4: str, object_mask_mp4: str, fps: float = 30.0):
-        self.cap_h = cv2.VideoCapture(human_mask_mp4)
-        self.cap_o = cv2.VideoCapture(object_mask_mp4)
-        if not self.cap_h.isOpened() or not self.cap_o.isOpened():
-            raise RuntimeError(
-                f"failed to open mask videos: human={human_mask_mp4}, object={object_mask_mp4}"
-            )
-        self.fps = float(fps)
-        self._idx = -1
-        self._frame_h = None
-        self._frame_o = None
-
-    def _frame_index_from_time_str(self, frame_time: str) -> int:
-        if isinstance(frame_time, str) and frame_time.startswith("t"):
-            try:
-                t = float(frame_time[1:])
-                return int(round(t * self.fps))
-            except ValueError:
-                pass
-        try:
-            return int(frame_time)
-        except (TypeError, ValueError):
-            raise ValueError(f"unsupported frame_time format: {frame_time}")
-
-    def _read_next(self) -> tuple[np.ndarray, np.ndarray]:
-        ok_h, fh = self.cap_h.read()
-        ok_o, fo = self.cap_o.read()
-        if not ok_h or not ok_o or fh is None or fo is None:
-            raise RuntimeError(f"mask videos ended early at frame index {self._idx + 1}")
-        self._idx += 1
-        self._frame_h = fh
-        self._frame_o = fo
-        return fh, fo
-
-    def get_masks(self, frame_time: str) -> tuple[np.ndarray, np.ndarray]:
-        target_idx = self._frame_index_from_time_str(frame_time)
-        if target_idx < self._idx:
-            raise RuntimeError(
-                f"non-monotonic frame access for mp4 masks: target={target_idx}, current={self._idx}"
-            )
-        while self._idx < target_idx:
-            self._read_next()
-        if self._frame_h is None or self._frame_o is None:
-            self._read_next()
-        mask_h = (cv2.cvtColor(self._frame_h, cv2.COLOR_BGR2GRAY) > 127).astype(np.uint8) * 255
-        mask_o = (cv2.cvtColor(self._frame_o, cv2.COLOR_BGR2GRAY) > 127).astype(np.uint8) * 255
-        return mask_h, mask_o
-
-
 def normalized_trans_delta_gt_from_batch(batch: dict, cfg: Any) -> torch.Tensor:
     """Object translation delta GT in the same normalized (BT, 3) space as ``Trainer.forward_batch``.
 
@@ -203,30 +153,6 @@ def diagnose_trans_delta_gt_batch_diff(
 class HORefineRunner(BehaveFPNLFRenderer):
     "refine both human and object"
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def prepare_video_mask_loader(self, args, kids, video_prefix, cfg):
-        args.nodepth = False
-        controllers, _ = init_video_controllers(args, args.video, kids)
-
-        human_mask_mp4 = None
-        object_mask_mp4 = None
-        masks_root = str(getattr(cfg, "masks_root", ""))
-        if "," in masks_root:
-            left, right = masks_root.split(",", 1)
-            if left.strip().lower().endswith(".mp4") and right.strip().lower().endswith(".mp4"):
-                human_mask_mp4 = left.strip()
-                object_mask_mp4 = right.strip()
-        if human_mask_mp4 and object_mask_mp4:
-            print(f'loading masks from mp4: {human_mask_mp4}, {object_mask_mp4}')
-            tar_mask = MP4MaskLoader(human_mask_mp4, object_mask_mp4, fps=float(getattr(args, "fps", 30)))
-        else:
-            h5_path = f'{cfg.masks_root}/{video_prefix}_masks_k{args.cam_id}.h5'
-            print(f'loading masks from {h5_path}')
-            tar_mask = h5py.File(h5_path, 'r')
-        return controllers, tar_mask
-
     @torch.no_grad()
     def run(self, args, cfg):
         "refine both human and object of one video given by cfg.video"
@@ -317,25 +243,30 @@ class HORefineRunner(BehaveFPNLFRenderer):
             frames_used = batch["frames_used"]
             full_colors = batch["full_colors"]
             K_rois = batch['K_rois']
-            poseA = batch['pose_perturbed']
-            poseB = batch['pose_gt']
+            poseA = batch['obj_pose_init']
+            poseB = batch['obj_pose_gt']
 
             # Init Params
-            poses_nlf_init = batch['hum_pose_init']
-            trans_nlf_init = batch['hum_transl_init']
-            betas_nlf_init = batch['hum_betas_init']
-
+            hum_pose_init = batch['hum_pose_init'][0].float().to(device)
+            hum_betas_init = batch['hum_betas_init'][0].float().to(device)
+            hum_trans_init = batch['hum_transl_init'][0].float().to(device)
+            
+            
             # GT params
-            poses_gt = batch['hum_pose_gt']
-            betas_gt = batch['hum_betas_gt']
-            trans_gt = batch['hum_transl_gt']
-            betas_gt_t = torch.from_numpy(np.asarray(betas_gt, dtype=np.float32)).to(device).float()[None]
-            betas_nlf_t = torch.from_numpy(np.asarray(betas_nlf_init, dtype=np.float32)).to(device).float()[None]
-            nlf_poses_t = torch.from_numpy(np.asarray(poses_nlf_init, dtype=np.float32)).to(device).float()[None]
+            hum_pose_gt = batch['hum_pose_gt'][0].float().to(device)
+            hum_betas_gt = batch['hum_betas_gt'][0].float().to(device)
+            hum_trans_gt = batch['hum_transl_gt'][0].float().to(device)
+
+            obj_pose_init = batch['obj_pose_init'][0].float().to(device)
+            obj_pose_gt = batch['obj_pose_gt'][0].float().to(device)
+
+
             batch_model = dict(batch)
-            batch_model["betas_gt"] = betas_gt_t
-            batch_model["betas_nlf"] = betas_nlf_t
-            batch_model["nlf_poses"] = nlf_poses_t
+            batch_model["pose_perturbed"] = batch['obj_pose_init']
+            batch_model["pose_gt"] = batch['obj_pose_gt']
+            batch_model["betas_gt"] = batch['hum_betas_gt']
+            batch_model["betas_nlf"] = batch['hum_betas_init']
+            batch_model["nlf_poses"] = batch['hum_pose_init']
 
             mb0 = collated_batch_item_for_delta_gt(batch, bid=0)
             trans_delta_gt2 = normalized_trans_delta_gt_from_batch(mb0, cfg)
@@ -348,7 +279,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
             # Record comparison metrics/fingerprints INSIDE run_1seq.
             fm = batch.get('frame_mask', None)
             if fm is None:
-                bs, ts = batch['pose_perturbed'].shape[:2]
+                bs, ts = batch['obj_pose_init'].shape[:2]
                 fm = torch.ones((bs, ts), device=trans_delta_pred.device, dtype=trans_delta_pred.dtype)
             fm = fm.unsqueeze(-1)
             bs, ts = fm.shape[:2]
@@ -366,7 +297,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
                     ).mean().item() * float(getattr(cfg, "w_rot", 1.0))
                 )
             )
-
 
             if ("hum_pose" in output) and ("delta_smpl_rot" in batch_model):
                 gt_delta_r = batch_model["delta_smpl_rot"][:, :, :, :, :2].reshape(-1, 24 * 6)
@@ -386,16 +316,13 @@ class HORefineRunner(BehaveFPNLFRenderer):
             #### Start of update SMPL pose
             pred_betas, pred_smpl_pose, pred_smpl_r, pred_smpl_t = trainer.smpl_params_from_pred(batch_model, output)
             pred_smpl_pose = pose72to156(pred_smpl_pose)
+
             # still use the old NLF translation
-
-            verts_init = body_model(torch.from_numpy(poses_nlf_init).to(device),  # match
-                                               torch.from_numpy(betas_nlf_init).to(device),  # match
-                                               torch.from_numpy(trans_nlf_init).to(device))[0].cpu().numpy()
-
+            verts_init = body_model(hum_pose_init, hum_betas_init, hum_trans_init)[0].cpu().numpy()
             verts_pred = body_model(pred_smpl_pose, pred_betas, pred_smpl_t)[0].cpu().numpy()
 
         
-            prep['nlf_transl'] = torch.from_numpy(trans_nlf_init).float().to(device)[None].to(device).float()  # matches
+            prep['nlf_transl'] = hum_trans_init[None].float()  # matches
 
             # joints from landmarks
             joints_nlf_np = landmark.get_body_kpts_batch(verts_pred)  # (T, 25, 3)
@@ -405,13 +332,14 @@ class HORefineRunner(BehaveFPNLFRenderer):
             nlf_rot_np = R.from_rotvec(poses_nlf.reshape(-1, 3)).as_matrix().astype(np.float32).reshape(-1, 52, 3, 3)[:, :24]# prediction has only 24 joints 
             prep['nlf_rotmat'] = torch.from_numpy(nlf_rot_np).to(device).float()  # (BT, J, 3, 3)
 
-            prep['betas_gt'] = torch.from_numpy(betas_gt)[None].to(device).float()
+            prep['betas_gt'] = hum_betas_gt[None].float()
             poses_nlf, trans_nlf = poses_nlf, prep['nlf_transl'].cpu().numpy()[0]  # TODO: update betas if needed
             #### End of update SMPL pose
 
             # step 7: visualize predictions by rendering SMPL + object in batch (similar to tools/viz_pred.py)
-
             K = self.K_full.copy()
+           
+            # Render at full input-image scale (no downscale) so overlays align with input frames.
             scale_ratio = 2
             K[:2] /= scale_ratio
             H, W = H_full // scale_ratio, W_full // scale_ratio
@@ -422,9 +350,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
             R_pred = B_in_cams[0, :, :3, :3].to(device).float()  # (T, 3, 3)
             t_pred = B_in_cams[0, :, :3, 3].to(device).float()  # (T, 3)
             obj_verts_pr = torch.matmul(obj_base_centered[None].expand(end - start, -1, -1),
-                                        R_pred.permute(0, 2, 1)) + t_pred[:, None]
-
-            verts_pr = body_model(pred_smpl_pose.to(device), betas_gt_t.reshape(-1, 10), pred_smpl_t.to(device))[0]
+                                        R_pred.permute(0, 2, 1)) + t_pred[:, None]        
+            verts_pr = body_model(pred_smpl_pose.to(device), hum_betas_gt.reshape(-1, 10), pred_smpl_t.to(device))[0]
 
             verts_comb_pr = torch.cat([verts_pr, obj_verts_pr], dim=1)  # (T, N_total, 3)
 
@@ -447,10 +374,10 @@ class HORefineRunner(BehaveFPNLFRenderer):
 
             data_pr['smpl_pose'].append(pred_smpl_pose)  # (BT, 156)
             data_pr['smpl_t'].append(pred_smpl_t)
-            data_pr['betas'].append(betas_gt_t.reshape(-1, 10))
-            data_gt['smpl_pose'].append(torch.from_numpy(poses_gt).to(device).float().reshape(-1, 156))
-            data_gt['smpl_t'].append(torch.from_numpy(trans_gt).to(device).float().reshape(-1, 3))
-            data_gt['betas'].append(torch.from_numpy(betas_gt).to(device).float().reshape(-1, 10))
+            data_pr['betas'].append(hum_betas_gt.reshape(-1, 10))
+            data_gt['smpl_pose'].append(hum_pose_gt.reshape(-1, 156))
+            data_gt['smpl_t'].append(hum_trans_gt.reshape(-1, 3))
+            data_gt['betas'].append(hum_betas_gt.reshape(-1, 10))
             data_pr['verts'].append(verts_pr)
             data_in['verts'].append(torch.from_numpy(verts_init).to(device).float())
 
@@ -469,17 +396,15 @@ class HORefineRunner(BehaveFPNLFRenderer):
             frames_all.extend(files) # to accumulate for all
 
             # Input data
-            data_in['smpl_pose'].append(torch.from_numpy(poses_nlf_init).to(device).float().reshape(-1, 156))
-            data_in['smpl_t'].append(torch.from_numpy(trans_nlf_init).to(device).float().reshape(-1, 3))
-            betas_avg = np.mean(betas_gt, axis=0)[None].repeat(len(poses_nlf_init), axis=0)
-            data_in['betas'].append(torch.from_numpy(betas_avg).to(device).float().reshape(-1, 10))
+            data_in['smpl_pose'].append(hum_pose_init.reshape(-1, 156))
+            data_in['smpl_t'].append(hum_trans_init.reshape(-1, 3))
+            betas_avg = hum_betas_gt.mean(dim=0, keepdim=True).repeat(len(hum_pose_init), 1)
+            data_in['betas'].append(betas_avg.reshape(-1, 10))
 
             
             # Prepare GT SMPL and object for visualization
             if not cfg.wild_video:
-                vs_gt_world = body_model(torch.from_numpy(poses_gt).to(device),
-                                         torch.from_numpy(betas_gt).to(device),
-                                         torch.from_numpy(trans_gt).to(device))[0]
+                vs_gt_world = body_model(hum_pose_gt, hum_betas_gt, hum_trans_gt)[0]
                 
                 data_gt['verts'].append(vs_gt_world)
 
@@ -493,19 +418,80 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 verts_comb_gt = torch.cat([vs_gt_world, obj_verts_gt], dim=1)
                 _, rend_gt, rend_gt_side, _ = self.render_front_side(H, K, W, glctx, mesh_tensors, verts_comb_gt)
 
-            # visualize input
-            if cfg.viz_input:
-                maskA, maskB, rgbsA, rgbsB, xyzA, xyzB = trainer.prepare_input_viz(batch, cfg)
-
             try:
+                maskA, maskB, rgbsA, rgbsB, xyzA, xyzB = trainer.prepare_input_viz(batch, cfg)
+                bboxes = np.asarray(batch.get("bboxes", None), dtype=np.float32) if batch.get("bboxes", None) is not None else None
+                bboxes_scaled = (bboxes / float(scale_ratio)) if bboxes is not None else None
+
                 for j in tqdm(range(end - start)):
                     frame_time = osp.basename(frames_used[j])
                     # reuse preloaded color
                     color = cv2.resize(full_colors[j], (W, H))
                     in_comb = self.comb_front_side(color, rend_in[j], rend_in_side[j])
                     pr_comb = self.comb_front_side(color, rend_pr[j], rend_pr_side[j])
-                    rgb_comb = self.comb_front_side(color, color, color)
-                    combs = [rgb_comb, in_comb, pr_comb]
+                    rgb_comb = self.comb_front_side(color, color, torch.zeros_like(color))
+                    combs = [rgb_comb]
+                    bid = 0
+
+                    def _to_vis3(x: np.ndarray) -> np.ndarray:
+                        if x.ndim == 2:
+                            x = x[:, :, None]
+                        if x.shape[2] == 1:
+                            x = np.repeat(x, 3, axis=2)
+                        elif x.shape[2] == 2:
+                            x = np.concatenate([x, np.zeros_like(x[:, :, :1])], axis=2)
+                        elif x.shape[2] > 3:
+                            x = x[:, :, :3]
+                        if x.dtype != np.uint8:
+                            x = x.astype(np.float32)
+                            if x.max() <= 1.0:
+                                x = x * 255.0
+                            x = np.clip(x, 0, 255).astype(np.uint8)
+                        return x
+
+                    def _uncrop_to_full(
+                        img: np.ndarray,
+                        bbox: np.ndarray,
+                        out_h: int,
+                        out_w: int,
+                        interp: int,
+                        bg_value: int = 0,
+                    ) -> np.ndarray:
+                        x1, y1, x2, y2 = [float(v) for v in bbox]
+                        x1i, y1i = int(np.floor(x1)), int(np.floor(y1))
+                        x2i, y2i = int(np.ceil(x2)), int(np.ceil(y2))
+                        x1i = max(0, min(out_w - 1, x1i))
+                        y1i = max(0, min(out_h - 1, y1i))
+                        x2i = max(x1i + 1, min(out_w, x2i))
+                        y2i = max(y1i + 1, min(out_h, y2i))
+                        patch = cv2.resize(img, (x2i - x1i, y2i - y1i), interpolation=interp)
+                        canvas = np.full((out_h, out_w, 3), int(bg_value), dtype=np.uint8)
+                        canvas[y1i:y2i, x1i:x2i] = patch
+                        return canvas
+
+                    maska_vis = _to_vis3(maskA[bid, j].transpose(1, 2, 0))
+                    maskb_vis = _to_vis3(maskB[bid, j].transpose(1, 2, 0))
+                    if bboxes_scaled is not None and j < len(bboxes_scaled):
+                        maska_vis = _uncrop_to_full(maska_vis, bboxes_scaled[j], H, W, cv2.INTER_NEAREST)
+                        maskb_vis = _uncrop_to_full(maskb_vis, bboxes_scaled[j], H, W, cv2.INTER_NEAREST)
+                    mask_panel = self.comb_front_side(maska_vis, maska_vis, maskb_vis)
+
+                    xyza_vis = (np.clip(xyzA[bid, j].transpose(1, 2, 0) + 0.5, 0, 1.0) * 255).astype(np.uint8)
+                    xyzb_vis = (np.clip(xyzB[bid, j].transpose(1, 2, 0) + 0.5, 0, 1.0) * 255).astype(np.uint8)
+                    if bboxes_scaled is not None and j < len(bboxes_scaled):
+                        # XYZ visualization uses +0.5 offset mapping, so neutral background is mid-gray.
+                        xyza_vis = _uncrop_to_full(xyza_vis, bboxes_scaled[j], H, W, cv2.INTER_LINEAR, bg_value=127)
+                        xyzb_vis = _uncrop_to_full(xyzb_vis, bboxes_scaled[j], H, W, cv2.INTER_LINEAR, bg_value=127)
+                    xyz_panel = self.comb_front_side(xyza_vis, xyza_vis, xyzb_vis)
+
+                    def _fit_h(img: np.ndarray, h: int) -> np.ndarray:
+                        ih, iw = img.shape[:2]
+                        return cv2.resize(img, (max(1, int(iw * h / ih)), h))
+
+                    h_target = rgb_comb.shape[0]
+                    combs.extend([_fit_h(mask_panel, h_target), _fit_h(xyz_panel, h_target)])
+
+                    combs.extend([in_comb, pr_comb])
                     if not cfg.wild_video:
                         gt_comb = self.comb_front_side(color, rend_gt[j], rend_gt_side[j])
                         combs.append(gt_comb)
@@ -519,16 +505,6 @@ class HORefineRunner(BehaveFPNLFRenderer):
                     comb = np.concatenate(combs, axis=1)
                     cv2.putText(comb, frame_time+ f' idx {j+start}', (comb.shape[1] // 4, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
                                 (0, 255, 255), 2)
-
-                    if cfg.viz_input:
-                        bid = 0
-                        comb_in, rgba, rgbb = trainer.visualize_rgbm(batch, bid, j, maskA, maskB, rgbsA, rgbsB)
-                        xyza_vis = (np.clip(xyzA[bid, j].transpose(1, 2, 0) + 0.5, 0, 1.) * 255).astype(np.uint8)
-                        xyzb_vis = (np.clip(xyzB[bid, j].transpose(1, 2, 0) + 0.5, 0, 1.) * 255).astype(np.uint8)
-                        comb_in = np.concatenate([comb_in, np.concatenate([xyza_vis, xyzb_vis], 0)], axis=1)
-                        hc, (hi, wi) = comb.shape[0], comb_in.shape[:2]
-                        comb_in = cv2.resize(comb_in, (int(wi*hc/hi), hc))
-                        comb = np.concatenate([comb, comb_in], axis=1)
 
                     vw.append_data(comb)
             finally:
@@ -719,193 +695,6 @@ def _mesh_tensors_to_device(mesh_tensors: dict, device: torch.device) -> dict:
     for k, v in mesh_tensors.items():
         out[k] = v.to(device) if torch.is_tensor(v) else v
     return out
-
-
-def write_finetune_horefine_style_mp4(
-    trainer: Trainer,
-    cfg: Any,
-    batch: dict,
-    output: dict,
-    B_in_cams: torch.Tensor,
-    seq_name: str,
-    out_path: str,
-    bid: int = 0,
-    append_rgbm_panel: bool = True,
-) -> bool:
-    """
-    Same visualization path as run_1seq (render_front_side + comb_front_side + optional rgbm panel),
-    but SMPL/object vertices and RGB are taken from a collated training batch and forward outputs.
-    """
-    from argparse import Namespace
-
-    import imageio.v2 as imageio
-
-    hy3d = (os.environ.get("FINETUNE_HY3D_MESH", "") or "").strip() or getattr(cfg, "hy3d_meshes_root", None)
-    if not hy3d:
-        print("[finetune-viz] mesh skip: no hy3d_meshes_root / FINETUNE_HY3D_MESH")
-        return False
-    hy3d_s = str(hy3d)
-    if hy3d_s.lower().endswith(".obj"):
-        if not osp.isfile(hy3d_s):
-            print(f"[finetune-viz] mesh skip: HY3D obj missing: {hy3d_s}")
-            return False
-    elif not osp.isdir(hy3d_s):
-        print(f"[finetune-viz] mesh skip: hy3d_meshes_root not a dir or .obj: {hy3d_s}")
-        return False
-
-    try:
-        device = trainer.accelerator.device
-        _run_args = Namespace(
-            rend_size=224,
-            wild_video=bool(getattr(cfg, "wild_video", False)),
-            data_source=str(getattr(cfg, "data_source", "behave")),
-            video=str(getattr(cfg, "video", "") or "dummy.mp4"),
-        )
-        runner = HORefineRunner(_run_args)
-        runner.cfg = cfg
-        runner.side_view_z = None
-
-        center = np.zeros(3, dtype=np.float32) if not _run_args.wild_video else None
-        # Must use scene mesh_tensors from load_smpl_obj_uvmap (SMPL+obj faces / uv), same as run_1seq — not object-only.
-        mesh_tensors, meshes = load_smpl_obj_uvmap(seq_name, use_hy3d=True, meshes_root=hy3d_s)
-        mesh_tensors = _mesh_tensors_to_device(mesh_tensors, device)
-        obj_idx = 1
-        verts_obj_base_t = meshes[obj_idx].verts_padded()[0].to(device).float()
-        if center is None:
-            center = np.mean(verts_obj_base_t.detach().cpu().numpy(), axis=0).astype(np.float32)
-        obj_base_centered = verts_obj_base_t - torch.as_tensor(center, device=device, dtype=torch.float)
-        glctx = dr.RasterizeCudaContext()
-
-        try:
-            gender = _sub_gender[seq_name.split("_")[1]]
-        except (IndexError, KeyError):
-            gender = "male" if bool(batch["is_male"].reshape(-1)[0].item()) else "female"
-        body_model = get_smpl(gender, hands=True).to(device)
-
-        pose_in = batch["pose_perturbed"].float()
-        pose_gt = batch["pose_gt"].float()
-        T = pose_in.shape[1]
-
-        if "nlf_poses" in batch:
-            nlf_p = batch["nlf_poses"][bid].reshape(T, -1).float().to(device)
-        else:
-            nlf_p = torch.from_numpy(np.asarray(batch["hum_pose_init"], dtype=np.float32)).to(device).reshape(T, -1)
-        if nlf_p.shape[-1] != 156:
-            raise ValueError(f"expected nlf_poses last dim 156, got {nlf_p.shape}")
-        if "betas_gt" in batch:
-            betas_gt_bt = batch["betas_gt"][bid].reshape(T, 10).float().to(device)
-        else:
-            betas_gt_bt = torch.from_numpy(np.asarray(batch["hum_betas_gt"], dtype=np.float32)).to(device).reshape(T, 10)
-        nlf_trans_bt = batch["nlf_transl"][bid].reshape(T, 3).float().to(device)
-        verts_nlf = body_model(nlf_p, betas_gt_bt, nlf_trans_bt)[0]
-
-        R_in = pose_in[bid, :, :3, :3].to(device)
-        t_in = pose_in[bid, :, :3, 3].to(device)
-        obj_v_in = torch.matmul(obj_base_centered[None].expand(T, -1, -1), R_in.permute(0, 2, 1)) + t_in[:, None]
-        verts_comb_in = torch.cat([verts_nlf, obj_v_in], dim=1)
-
-        # run_1seq step 7: pose72to156 + betas_gt + pred_smpl_t (same as lines 503–544).
-        _, pred_smpl_pose72_bt, _, pred_smpl_t_bt = trainer.smpl_params_from_pred(batch, output)
-        pred_smpl_pose156 = pose72to156(
-            pred_smpl_pose72_bt[bid * T : (bid + 1) * T].reshape(T, -1).float().to(device)
-        )
-        pred_smpl_t = pred_smpl_t_bt[bid * T : (bid + 1) * T].reshape(T, 3).float().to(device)
-        verts_pr = body_model(pred_smpl_pose156, betas_gt_bt, pred_smpl_t)[0]
-        R_pr = B_in_cams[bid, :, :3, :3].float().to(device)
-        t_pr = B_in_cams[bid, :, :3, 3].float().to(device)
-        obj_v_pr = torch.matmul(obj_base_centered[None].expand(T, -1, -1), R_pr.permute(0, 2, 1)) + t_pr[:, None]
-        verts_comb_pr = torch.cat([verts_pr, obj_v_pr], dim=1)
-
-        if "smpl_poses_gt" in batch:
-            gt156 = batch["smpl_poses_gt"][bid].reshape(T, -1).float().to(device)
-        else:
-            gt156 = torch.from_numpy(np.asarray(batch["hum_pose_gt"], dtype=np.float32)).to(device).reshape(T, -1)
-        if "smpl_transl_gt" in batch:
-            smpl_t_gt = batch["smpl_transl_gt"][bid].reshape(T, 3).float().to(device)
-        else:
-            smpl_t_gt = torch.from_numpy(np.asarray(batch["hum_transl_gt"], dtype=np.float32)).to(device).reshape(T, 3)
-        verts_gt = body_model(
-            gt156,
-            betas_gt_bt,
-            smpl_t_gt,
-        )[0]
-        R_gt = pose_gt[bid, :, :3, :3].to(device)
-        t_gt = pose_gt[bid, :, :3, 3].to(device)
-        obj_v_gt = torch.matmul(obj_base_centered[None].expand(T, -1, -1), R_gt.permute(0, 2, 1)) + t_gt[:, None]
-        verts_comb_gt = torch.cat([verts_gt, obj_v_gt], dim=1)
-
-        rgbb = (batch["input_rgbs"][bid].detach().cpu().numpy().transpose(0, 2, 3, 1) * 255.0).clip(0, 255).astype(
-            np.uint8
-        )
-        H, W = int(rgbb.shape[1]), int(rgbb.shape[2])
-        Ks_bt = batch["K_rois"][bid].detach().cpu().numpy()
-
-        # Same render order as run_1seq after optimization: pred, input, then GT.
-        # Per-frame K_roi: ROI intrinsics can change each frame in VideoDataset.
-        _, rend_pr, rend_pr_side, _ = runner.render_front_side_Ks(H, W, Ks_bt, glctx, mesh_tensors, verts_comb_pr)
-        _, rend_in, rend_in_side, _ = runner.render_front_side_Ks(H, W, Ks_bt, glctx, mesh_tensors, verts_comb_in)
-        rend_gt, rend_gt_side = None, None
-        if not cfg.wild_video:
-            _, rend_gt, rend_gt_side, _ = runner.render_front_side_Ks(H, W, Ks_bt, glctx, mesh_tensors, verts_comb_gt)
-
-        viz_input = bool(getattr(cfg, "viz_input", True))
-        if viz_input and append_rgbm_panel:
-            maskA, maskB, rgbsA, rgbsB, xyzA, xyzB = trainer.prepare_input_viz(batch, cfg)
-
-        if osp.exists(out_path):
-            os.remove(out_path)
-        vw = imageio.get_writer(out_path, fps=15)
-        try:
-            for j in tqdm(range(T)):
-                color = rgbb[j]
-                in_comb = runner.comb_front_side(color, rend_in[j], rend_in_side[j])
-                pr_comb = runner.comb_front_side(color, rend_pr[j], rend_pr_side[j])
-                rgb_comb = runner.comb_front_side(color, color, color)
-                combs = [rgb_comb, in_comb, pr_comb]
-                if not cfg.wild_video:
-                    gt_comb = runner.comb_front_side(color, rend_gt[j], rend_gt_side[j])
-                    combs.append(gt_comb)
-                    h0, w0 = color.shape[:2]
-                    x1, x2 = int(w0 * 0.15), int(w0 * 0.85)
-                    y1, y2 = int(h0 * 0.15), int(h0 * 1.0)
-                    _pr_side = rend_pr_side[j][y1:y2, x1:x2]
-                    _gt_side = rend_gt_side[j][y1:y2, x1:x2]
-
-                comb = np.concatenate(combs, axis=1)
-                if batch.get("image_files") is not None:
-                    try:
-                        frame_tag = str(batch["image_files"][bid][j])
-                    except Exception:
-                        frame_tag = f"f{j}"
-                else:
-                    frame_tag = f"f{j}"
-                cv2.putText(
-                    comb,
-                    frame_tag,
-                    (comb.shape[1] // 4, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 255, 255),
-                    2,
-                )
-
-                if viz_input and append_rgbm_panel:
-                    comb_in, rgba, rgbb = trainer.visualize_rgbm(batch, bid, j, maskA, maskB, rgbsA, rgbsB)
-                    xyza_vis = (np.clip(xyzA[bid, j].transpose(1, 2, 0) + 0.5, 0, 1.0) * 255).astype(np.uint8)
-                    xyzb_vis = (np.clip(xyzB[bid, j].transpose(1, 2, 0) + 0.5, 0, 1.0) * 255).astype(np.uint8)
-                    comb_in = np.concatenate([comb_in, np.concatenate([xyza_vis, xyzb_vis], 0)], axis=1)
-                    hc, hi, wi = comb.shape[0], comb_in.shape[0], comb_in.shape[1]
-                    comb_in = cv2.resize(comb_in, (int(wi * hc / hi), hc))
-                    comb = np.concatenate([comb, comb_in], axis=1)
-
-                vw.append_data(comb)
-        finally:
-            vw.close()
-        print(f"[finetune-viz] horefine-style mesh grid -> {out_path}")
-        return True
-    except Exception as ex:
-        print(f"[finetune-viz] mesh grid failed ({ex}); falling back to box viz")
-        return False
 
 
 def main():

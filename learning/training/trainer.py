@@ -241,6 +241,17 @@ class Trainer(object):
         return hashlib.sha1(arr.tobytes()).hexdigest()
 
     @staticmethod
+    def _get_poseA_norm(batch) -> torch.Tensor:
+        """Return normalized init pose expected by CoCoNet."""
+        if "poseA_norm" in batch:
+            return batch["poseA_norm"]
+        if ("obj_pose_init" in batch) and ("mesh_diameter" in batch):
+            pose = batch["obj_pose_init"].clone()
+            pose[:, :, :3, 3] *= 2.0 / batch["mesh_diameter"].reshape(len(pose), pose.shape[1], 1)
+            return pose
+        raise KeyError("missing poseA_norm (or obj_pose_init+mesh_diameter)")
+
+    @staticmethod
     def coconet_input_fingerprint_dict(batch, frame_ids: Optional[list] = None) -> dict:
         """JSON-serializable fingerprints for CoCONet inputs (train vs viz pipeline check)."""
         out: dict = {}
@@ -320,7 +331,7 @@ class Trainer(object):
         # forward_batch(): model(cat([render_rgbs, render_xyz], 2), cat([input_rgbs, input_xyz], 2), poseA_norm, batch)
         in_a = torch.cat([batch["render_rgbs"], batch["render_xyz"]], 2)
         in_b = torch.cat([batch["input_rgbs"], batch["input_xyz"]], 2)
-        pose_p = batch["poseA_norm"]
+        pose_p = Trainer._get_poseA_norm(batch)
         return {
             "in_a": Trainer._tensor_fingerprint(in_a),
             "in_b": Trainer._tensor_fingerprint(in_b),
@@ -1350,7 +1361,7 @@ class Trainer(object):
         "forward one batch"
         imgsB, imgsA = batch['input_rgbs'], batch['render_rgbs']
         xyzB, xyzA = batch['input_xyz'], batch['render_xyz']
-        pose_perturbed = batch['poseA_norm']
+        pose_perturbed = self._get_poseA_norm(batch)
         output = model(torch.cat([imgsA, xyzA], 2), torch.cat([imgsB, xyzB], 2), pose_perturbed, batch)
         # Never mutate batch GT tensors in-place here; downstream fingerprint checks rely on stable GT values.
         trans_delta_gt = batch['delta_transl'].clone()  # (B, T, 3)

@@ -828,9 +828,13 @@ def horefine_vis_window_render_and_make_batch(
         pose_perturbed_tensor[:, :, :3, :3].permute(0, 1, 3, 2),
     )
 
-    hum_pose_gt = np.ascontiguousarray(poses_full.astype(np.float32, copy=False))
-    hum_betas_gt = np.ascontiguousarray(betas_gt.astype(np.float32, copy=False))
-    hum_transl_gt = np.ascontiguousarray(packed["trans"][start:end].astype(np.float32, copy=False))
+    hum_pose_init = torch.from_numpy(np.ascontiguousarray(poses_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
+    hum_transl_init = torch.from_numpy(np.ascontiguousarray(trans_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
+    hum_betas_init = torch.from_numpy(np.ascontiguousarray(betas_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
+
+    hum_pose_gt = torch.from_numpy(np.ascontiguousarray(poses_full.astype(np.float32, copy=False))).float().cuda()[None]
+    hum_betas_gt = torch.from_numpy(np.ascontiguousarray(betas_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
+    hum_transl_gt = torch.from_numpy(np.ascontiguousarray(trans_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
 
     batch = {
         ## Input
@@ -839,29 +843,32 @@ def horefine_vis_window_render_and_make_batch(
         "input_xyz": torch.stack(input_xyz_final, 0).float().cuda()[None],
         "render_xyz": torch.stack(render_xyz, 0).float().cuda()[None],
         
-        "hum_pose_init": poses_nlf_init,
-        "hum_transl_init": trans_nlf_init,
-        "hum_betas_init": betas_nlf_init,
+        "hum_pose_init": hum_pose_init,
+        "hum_transl_init": hum_transl_init,
+        "hum_betas_init": hum_betas_init,
+        "obj_pose_init": pose_perturbed_tensor,
+        # "poseA_norm": torch.from_numpy(poseA_norm).float().cuda()[None],
 
         ## Target
         "hum_pose_gt": hum_pose_gt,
         "hum_betas_gt": hum_betas_gt,
         "hum_transl_gt": hum_transl_gt,
+        "obj_pose_gt": pose_gt_batched,
 
+        "delta_rot": delta_rot,
+        "delta_transl": delta_transl,
+        
+        ## Meta
         "joints_nlf": prep["joints_nlf"],
         "nlf_rotmat": prep["nlf_rotmat"],
         "nlf_transl": prep["nlf_transl"],
-        
-        ## Meta
+
         "B_in_cams_init": B_in_cams.copy(),
         "mesh_diameter": mesh_diam_tensor,
         "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),
-        "poseA_norm": torch.from_numpy(poseA_norm).float().cuda()[None],
-        "pose_perturbed": pose_perturbed_tensor,
-        "pose_gt": pose_gt_batched,
-        "delta_transl": delta_transl,
-        "delta_rot": delta_rot,
+        
         "K_rois": torch.from_numpy(np.stack(K_rois)).float().cuda()[None],
+        "bboxes": np.stack(bboxes).astype(np.float32),
         "full_hw": full_hw,
         "frames_used": list(frames_used),
         "full_colors": [np.asarray(x).copy() for x in full_colors],
@@ -1184,7 +1191,7 @@ class HoRefineVisBatchLoader:
             verts_hum_override=verts_hum_override,
         )
         # Keep iterative state inside loader so caller can use getitem(start, end, it=it) only.
-        pose_pert = single.get("pose_perturbed")
+        pose_pert = single.get("obj_pose_init")
         if torch.is_tensor(pose_pert) and pose_pert.ndim >= 3:
             self._iter_B_in_cams = pose_pert[0].detach().cpu().numpy().copy()
         prep_keys = ("joints_nlf", "nlf_rotmat", "nlf_transl", "betas_gt", "betas_nlf", "nlf_poses")
