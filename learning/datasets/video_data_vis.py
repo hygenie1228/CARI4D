@@ -251,6 +251,9 @@ def _ensure_rgbd_frame_cache(
                 int(meta.get("version", -1)) == cache_version
                 and int(meta.get("num_frames", -1)) == int(len(fp_frames))
             )
+            if not rebuild_cache and _cache_files_complete(len(fp_frames), lambda i: _frame_cache_file(frame_cache_dir, i)):
+                print(f"[cache] rgbd hit: {frame_cache_dir}")
+                return
         except Exception:
             rebuild_cache = True
     if rebuild_cache:
@@ -264,7 +267,8 @@ def _ensure_rgbd_frame_cache(
         enumerate(fp_frames),
         total=len(fp_frames),
         desc=f"[cache] rgbd cam{enum_idx}",
-        leave=False,
+        leave=True,
+        dynamic_ncols=True,
     )
     for idx, frame_time in itr:
         cache_fp = _frame_cache_file(frame_cache_dir, idx)
@@ -293,6 +297,23 @@ def _load_cached_masks(mask_cache_dir: str, idx: int) -> tuple[np.ndarray, np.nd
         return d["mask_h"], d["mask_o"]
 
 
+def _render_cache_file(render_cache_dir: str, idx: int) -> str:
+    return osp.join(render_cache_dir, f"{idx:06d}.npz")
+
+
+def _render_cache_meta_file(render_cache_dir: str) -> str:
+    return osp.join(render_cache_dir, "_meta.json")
+
+
+def _load_cached_render_inputs(render_cache_dir: str, idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    with np.load(_render_cache_file(render_cache_dir, idx)) as d:
+        return d["rgb"], d["input_xyz"], d["render_rgb"], d["render_xyz"]
+
+
+def _cache_files_complete(num_frames: int, file_fn) -> bool:
+    return all(osp.isfile(file_fn(i)) for i in range(int(num_frames)))
+
+
 def _ensure_mask_frame_cache(
     *,
     mask_cache_dir: str,
@@ -310,6 +331,9 @@ def _ensure_mask_frame_cache(
                 int(meta.get("version", -1)) == cache_version
                 and int(meta.get("num_frames", -1)) == int(len(fp_frames))
             )
+            if not rebuild_cache and _cache_files_complete(len(fp_frames), lambda i: _mask_cache_file(mask_cache_dir, i)):
+                print(f"[cache] masks hit: {mask_cache_dir}")
+                return
         except Exception:
             rebuild_cache = True
     if rebuild_cache:
@@ -323,7 +347,8 @@ def _ensure_mask_frame_cache(
         enumerate(fp_frames),
         total=len(fp_frames),
         desc="[cache] masks",
-        leave=False,
+        leave=True,
+        dynamic_ncols=True,
     )
     for idx, frame_time in itr:
         cache_fp = _mask_cache_file(mask_cache_dir, idx)
@@ -589,6 +614,7 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
         exp_root = osp.join(save_dir_abs, str(getattr(cfg, "exp_name", "debug")))
     frame_cache_dir = osp.join(exp_root, "data", "rgbd_frame_cache", seq_name, f"cam{kid}")
     mask_cache_dir = osp.join(exp_root, "data", "mask_frame_cache", seq_name, f"cam{kid}")
+    render_cache_dir = osp.join(exp_root, "data", "render_frame_cache", seq_name, f"cam{kid}")
     _ensure_rgbd_frame_cache(
         frame_cache_dir=frame_cache_dir,
         fp_frames=fp_frames,
@@ -652,6 +678,7 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
     partial.fp_frame_to_idx = fp_frame_to_idx
     partial.frame_cache_dir = frame_cache_dir
     partial.mask_cache_dir = mask_cache_dir
+    partial.render_cache_dir = render_cache_dir
     partial.kids = kids
     partial.packed = packed
     partial.nlf_data = nlf_data
@@ -676,6 +703,46 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
     partial.vw_input = vw_input
     if not hasattr(partial, "record_independent_vis"):
         partial.record_independent_vis = False
+
+    # Precompute expensive nvdiffrast-based render inputs once at loader materialization.
+    os.makedirs(render_cache_dir, exist_ok=True)
+    render_meta_fp = _render_cache_meta_file(render_cache_dir)
+    render_cache_version = 1
+    need_render_rebuild = True
+    if osp.isfile(render_meta_fp):
+        try:
+            meta = json.load(open(render_meta_fp, "r"))
+            need_render_rebuild = not (
+                int(meta.get("version", -1)) == render_cache_version
+                and int(meta.get("num_frames", -1)) == int(len(frames_packed))
+            )
+            if not need_render_rebuild and _cache_files_complete(
+                len(frames_packed), lambda i: _render_cache_file(render_cache_dir, i)
+            ):
+                print(f"[cache] render hit: {render_cache_dir}")
+                need_render_rebuild = False
+            elif not need_render_rebuild:
+                need_render_rebuild = True
+        except Exception:
+            need_render_rebuild = True
+    if need_render_rebuild:
+        for fn in os.listdir(render_cache_dir):
+            if fn.endswith(".npz") or fn == "_meta.json":
+                try:
+                    os.remove(osp.join(render_cache_dir, fn))
+                except OSError:
+                    pass
+        clip_len = int(getattr(cfg, "clip_len", 16))
+        for start in tqdm(
+            range(0, len(frames_packed), clip_len),
+            desc="[cache] render",
+            leave=True,
+            dynamic_ncols=True,
+        ):
+            end = min(start + clip_len, len(frames_packed))
+            _ = horefine_vis_rebuild_independent_window_batch(partial, start, end)
+        with open(render_meta_fp, "w") as f:
+            json.dump({"version": render_cache_version, "num_frames": int(len(frames_packed))}, f)
 
 
 def hydrate_horefine_vis_ctx(partial: Any) -> Any:
@@ -777,6 +844,7 @@ def horefine_vis_window_load_rgb_masks_depth(
     K_rois: list = []
     frames_used: list = []
     full_colors: list = []
+    fp_indices: list = []
     itr = tqdm(range(start, end)) if tqdm_frames else range(start, end)
     for i in itr:
         frame_time = frames_packed[i]
@@ -790,6 +858,7 @@ def horefine_vis_window_load_rgb_masks_depth(
             print(f"Frame {frame_time} not found in FP frames!")
             continue
         frames_used.append(f"{seq_name}/{frame_time}")
+        fp_indices.append(int(idx_fp))
         pose_fp = np.matmul(fp_poses[idx_fp, enum_idx], gt_to_perturb_pose)
         if mask_cache_dir is None or not osp.isdir(mask_cache_dir):
             raise FileNotFoundError(
@@ -826,7 +895,7 @@ def horefine_vis_window_load_rgb_masks_depth(
         K_rois.append(K_roi)
         poses_perturbed.append(pose_fp.copy())
         bboxes.append(bbox)
-    return input_rgbms, input_xyzs, bboxes, K_rois, poses_perturbed, frames_used, full_colors
+    return input_rgbms, input_xyzs, bboxes, K_rois, poses_perturbed, frames_used, full_colors, fp_indices
 
 
 def horefine_vis_window_render_and_make_batch(
@@ -868,6 +937,8 @@ def horefine_vis_window_render_and_make_batch(
     poses_nlf_init: np.ndarray,
     trans_nlf_init: np.ndarray,
     betas_nlf_init: np.ndarray,
+    fp_indices: list[int],
+    render_cache_dir: Optional[str],
 ) -> dict:
     """``betas_nlf_init`` is the raw NLF ``betas[:, cam]`` column; averaged+repeated for the batch key."""
     verts_obj_batch = [
@@ -876,7 +947,27 @@ def horefine_vis_window_render_and_make_batch(
     verts_hum_batch = verts_nlf_render.copy()
     input_rgbs_final, input_xyz_final = [], []
     render_rgbs, render_xyz = [], []
+    if render_cache_dir is not None:
+        os.makedirs(render_cache_dir, exist_ok=True)
     for fi in range(len(verts_obj_batch)):
+        idx_fp = int(fp_indices[fi])
+        cache_hit = False
+        if render_cache_dir is not None:
+            render_fp = _render_cache_file(render_cache_dir, idx_fp)
+            if osp.isfile(render_fp):
+                rgb_np, input_xyz_np, render_rgb_np, render_xyz_np = _load_cached_render_inputs(
+                    render_cache_dir, idx_fp
+                )
+                rgb = torch.from_numpy(np.ascontiguousarray(rgb_np)).float()
+                dmap_xyz = torch.from_numpy(np.ascontiguousarray(input_xyz_np)).float()
+                dmap_xyz_a = torch.from_numpy(np.ascontiguousarray(render_xyz_np)).float()
+                render_rgbs.append(np.ascontiguousarray(render_rgb_np).astype(np.float32))
+                render_xyz.append(dmap_xyz_a)
+                input_xyz_final.append(dmap_xyz)
+                input_rgbs_final.append(rgb)
+                cache_hit = True
+        if cache_hit:
+            continue
         vh = verts_hum_batch[fi]
         vo = verts_obj_batch[fi]
         mesh_tensors["pos"] = torch.from_numpy(np.concatenate([vh, vo], 0)).float().cuda()
@@ -963,6 +1054,14 @@ def horefine_vis_window_render_and_make_batch(
         render_xyz.append(dmap_xyz_a)
         input_xyz_final.append(dmap_xyz)
         input_rgbs_final.append(rgb)
+        if render_cache_dir is not None:
+            np.savez_compressed(
+                _render_cache_file(render_cache_dir, idx_fp),
+                rgb=rgb.detach().cpu().numpy().astype(np.float32),
+                input_xyz=dmap_xyz.detach().cpu().numpy().astype(np.float32),
+                render_rgb=(rgb_render.copy().transpose(2, 0, 1) / 255.0).astype(np.float32),
+                render_xyz=dmap_xyz_a.detach().cpu().numpy().astype(np.float32),
+            )
 
     poseA_norm = B_in_cams.copy()
     poseA_norm[:, :3, 3] *= 2 / mesh_diameter
@@ -1087,6 +1186,7 @@ def horefine_vis_rebuild_independent_window_batch(
     fp_frame_to_idx = getattr(ctx, "fp_frame_to_idx", None)
     frame_cache_dir = getattr(ctx, "frame_cache_dir", None)
     mask_cache_dir = getattr(ctx, "mask_cache_dir", None)
+    render_cache_dir = getattr(ctx, "render_cache_dir", None)
 
     # Prefer independent mask source. For MP4 readers, use a fresh instance per getitem
     # so repeated calls with the same [start, end] never hit backward frame access.
@@ -1137,7 +1237,7 @@ def horefine_vis_rebuild_independent_window_batch(
             f"getitem requires prebuilt RGBD cache, but directory is missing: {frame_cache_dir}"
         )
     try:
-        input_rgbms, input_xyzs, bboxes, K_rois, poses_perturbed, frames_used, _fc = (
+        input_rgbms, input_xyzs, bboxes, K_rois, poses_perturbed, frames_used, _fc, fp_indices = (
             horefine_vis_window_load_rgb_masks_depth(
                 start=start,
                 end=end,
@@ -1206,6 +1306,8 @@ def horefine_vis_rebuild_independent_window_batch(
             poses_nlf_init=poses_nlf_init,
             trans_nlf_init=trans_nlf_init,
             betas_nlf_init=betas_nlf_init,
+            fp_indices=fp_indices,
+            render_cache_dir=render_cache_dir,
         )
     finally:
         if controllers_reload is not None:
