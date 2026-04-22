@@ -502,10 +502,20 @@ class DINOTempHORefineDeltaAndAbs(DINOTempRefineNet):
 
     def comput_gt_obj_delta(self, B, batch):
         b, t = B.shape[:2]
-        trans_delta_gt = batch['delta_transl'].clone()  # (B, T, 3)
+        if ("delta_transl" in batch) and ("delta_rot" in batch):
+            trans_delta_gt = batch['delta_transl'].clone()  # (B, T, 3)
+            rot_delta_mat_gt = batch['delta_rot'].clone()
+        else:
+            pose_init = batch.get("obj_pose_init", batch.get("pose_perturbed", None))
+            pose_gt = batch.get("obj_pose_gt", batch.get("pose_gt", None))
+            if pose_init is None or pose_gt is None:
+                raise KeyError("missing delta supervision and absolute object poses")
+            trans_delta_gt = (pose_gt[:, :, :3, 3] - pose_init[:, :, :3, 3]).clone()
+            rot_delta_mat_gt = torch.matmul(
+                pose_gt[:, :, :3, :3], pose_init[:, :, :3, :3].permute(0, 1, 3, 2)
+            ).clone()
         mesh_radius = batch['mesh_diameter'] / 2.  # (B, T)
         trans_delta_gt *= 1 / mesh_radius.reshape(len(trans_delta_gt), t, -1)
-        rot_delta_mat_gt = batch['delta_rot'].clone()
         rot_delta_gt = so3_log_map(
             rot_delta_mat_gt.reshape(b * t, 3, 3).permute(0, 2, 1))  # permute: pyt3d so3 uses col order
         rot_delta_gt = rot_delta_gt / self.cfg['rot_normalizer']

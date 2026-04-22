@@ -1200,19 +1200,16 @@ def horefine_vis_window_render_and_make_batch(
     pose_gt_mat[:, :3, 3] = t_cam
     pose_gt_batched = pose_gt_mat[None].clone()
     pose_perturbed_tensor = torch.from_numpy(B_in_cams)[None].float().cuda()
-    delta_transl = pose_gt_batched[:, :, :3, 3] - pose_perturbed_tensor[:, :, :3, 3]
-    delta_rot = torch.matmul(
-        pose_gt_batched[:, :, :3, :3],
-        pose_perturbed_tensor[:, :, :3, :3].permute(0, 1, 3, 2),
-    )
 
     hum_pose_init = torch.from_numpy(np.ascontiguousarray(poses_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
     hum_transl_init = torch.from_numpy(np.ascontiguousarray(trans_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
     hum_betas_init = torch.from_numpy(np.ascontiguousarray(betas_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
 
     hum_pose_gt = torch.from_numpy(np.ascontiguousarray(poses_full.astype(np.float32, copy=False))).float().cuda()[None]
-    hum_betas_gt = torch.from_numpy(np.ascontiguousarray(betas_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
-    hum_transl_gt = torch.from_numpy(np.ascontiguousarray(trans_nlf_init.astype(np.float32, copy=False))).float().cuda()[None]
+    hum_betas_gt = torch.from_numpy(np.ascontiguousarray(betas_gt.astype(np.float32, copy=False))).float().cuda()[None]
+    hum_transl_gt = torch.from_numpy(
+        np.ascontiguousarray(packed["trans"][start:end].astype(np.float32))
+    ).float().cuda()[None]
 
     batch = {
         ## Input
@@ -1234,9 +1231,6 @@ def horefine_vis_window_render_and_make_batch(
         "hum_transl_gt": hum_transl_gt,
         "obj_pose_gt": pose_gt_batched,
 
-        "delta_rot": delta_rot,
-        "delta_transl": delta_transl,
-        
         ## Meta
         "mesh_diameter": mesh_diam_tensor,
         "trans_normalizer": trans_norm.reshape(1, len(poses_perturbed), 3),

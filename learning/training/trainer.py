@@ -252,6 +252,21 @@ class Trainer(object):
         raise KeyError("missing poseA_norm (or obj_pose_init+mesh_diameter)")
 
     @staticmethod
+    def _get_obj_delta_supervision(batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (delta_transl, delta_rot); derive from absolute poses when absent."""
+        if ("delta_transl" in batch) and ("delta_rot" in batch):
+            return batch["delta_transl"], batch["delta_rot"]
+
+        pose_init = batch.get("obj_pose_init", batch.get("pose_perturbed", None))
+        pose_gt = batch.get("obj_pose_gt", batch.get("pose_gt", None))
+        if pose_init is None or pose_gt is None:
+            raise KeyError("missing delta supervision and absolute object poses")
+
+        delta_transl = pose_gt[:, :, :3, 3] - pose_init[:, :, :3, 3]
+        delta_rot = torch.matmul(pose_gt[:, :, :3, :3], pose_init[:, :, :3, :3].permute(0, 1, 3, 2))
+        return delta_transl, delta_rot
+
+    @staticmethod
     def coconet_input_fingerprint_dict(batch, frame_ids: Optional[list] = None) -> dict:
         """JSON-serializable fingerprints for CoCONet inputs (train vs viz pipeline check)."""
         out: dict = {}
@@ -1364,7 +1379,8 @@ class Trainer(object):
         pose_perturbed = self._get_poseA_norm(batch)
         output = model(torch.cat([imgsA, xyzA], 2), torch.cat([imgsB, xyzB], 2), pose_perturbed, batch)
         # Never mutate batch GT tensors in-place here; downstream fingerprint checks rely on stable GT values.
-        trans_delta_gt = batch['delta_transl'].clone()  # (B, T, 3)
+        delta_transl_raw, delta_rot_raw = self._get_obj_delta_supervision(batch)
+        trans_delta_gt = delta_transl_raw.clone()  # (B, T, 3)
         mesh_radius = batch['mesh_diameter'] / 2.  # (B, T)
         trans_normalizer = batch['trans_normalizer']  # (B, T, 3)
         B, T = trans_delta_gt.shape[:2]
@@ -1375,7 +1391,7 @@ class Trainer(object):
             trans_delta_gt = trans_delta_gt / trans_normalizer
             if not (torch.abs(trans_delta_gt) <= 1 + 1e-3).all():
                 logging.info("ERROR label")
-        rot_delta_mat_gt = batch['delta_rot']
+        rot_delta_mat_gt = delta_rot_raw
         rot_delta_gt = so3_log_map(rot_delta_mat_gt.reshape(B * T, 3, 3).permute(0, 2, 1))  # permute: pyt3d so3 uses col order
         rot_delta_gt = rot_delta_gt / cfg['rot_normalizer']  # random noise sample range.
 
