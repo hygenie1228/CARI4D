@@ -698,7 +698,6 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
     gt_to_perturb_pose[:3, 3] = center
     verts_obj_base = verts_obj_base_t.detach().cpu().numpy() - center
     enum_idx, kid = 0, cfg.cam_id
-    fp_frame_to_idx = {str(f): i for i, f in enumerate(fp_frames)}
     save_dir_abs = osp.abspath(str(getattr(cfg, "save_dir", "experiments")))
     marker = f"{os.sep}data{os.sep}finetune_ckpts"
     if marker in save_dir_abs:
@@ -722,13 +721,16 @@ def _materialize_horefine_vis_ctx_from_partial(partial: Any) -> None:
         if osp.isfile(packed_file):
             packed = joblib.load(packed_file)
             print(f"loaded GT packed labels from {packed_file}")
-            fp_frames = [str(x) for x in packed.get("frames", [])]
+            frames_packed_src = [str(x) for x in packed.get("frames", [])]
+            if len(frames_packed_src) > 0:
+                fp_frames = frames_packed_src
     if fp_frames is None:
         z_obj = np.load(object_init_npz, allow_pickle=True)
         n_obj = int(np.asarray(z_obj["angle"]).shape[0])
         fp_frames = [f"{i:06d}" for i in range(n_obj)]
 
     fp_poses, fp_frames = _build_fp_from_object_init_npz(object_init_npz, fp_frames)
+    fp_frame_to_idx = {str(f): i for i, f in enumerate(fp_frames)}
     nlf_data = _build_nlf_from_human_init_npz(human_init_npz, fp_frames)
     _ensure_rgbd_frame_cache(
         frame_cache_dir=frame_cache_dir,
