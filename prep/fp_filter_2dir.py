@@ -35,6 +35,35 @@ from behave_data.utils import get_intrinsics_unified
 from behave_data.const import START_END_FRAMES
 
 
+# Used to record which sequences fail due to overly aggressive depth clipping (`zfar`).
+# Later runs will automatically switch to a safer (larger) zfar for those sequences only.
+_ROOT_DIR = osp.abspath(osp.join(osp.dirname(__file__), ".."))
+_ERROR_LIST_PATH = osp.join(_ROOT_DIR, "error_list.txt")
+
+
+def _load_error_set(path: str) -> set[str]:
+    if not osp.isfile(path):
+        return set()
+    out: set[str] = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            out.add(s)
+    return out
+
+
+def _append_error_sample(path: str, sample: str, cache: set[str] | None = None) -> None:
+    if cache is not None and sample in cache:
+        return
+    os.makedirs(osp.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(sample + "\n")
+    if cache is not None:
+        cache.add(sample)
+
+
 class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
     ""
     def get_chunk_num(self):
@@ -61,7 +90,16 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
 
         print('kids:', kids)
         args = self.args
-        self.zfar = 3.8 if self.args.data_source in ['behave', 'intercap'] and not self.args.wild_video else 8.0  # for HODome, allow larger depth range 
+        # Default zfar may be too small for some "wild_video" behave sequences where most depth is > ~8m.
+        # The original failure mode we saw is: after fp_filter's depth cleaning (erode+bilateral),
+        # the number of valid depth pixels inside the object mask becomes < 4 for the first frame.
+        # In that case, estimator.register() can crash early. We record the sequence in error_list.txt and
+        # then switch zfar to a safer (larger) value for that sequence only.
+        error_set = _load_error_set(_ERROR_LIST_PATH)
+        zfar_default = 3.8 if self.args.data_source in ['behave', 'intercap'] and not self.args.wild_video else 8.0
+        zfar_fallback = 50.0
+        self.zfar = zfar_fallback if self.video_prefix in error_set else zfar_default
+        print(f"[fp_filter] zfar={self.zfar} (video_prefix={self.video_prefix}, wild={self.args.wild_video})")
         pose_dict, pose_hist_dict = {}, {}
         pose_best_dict = {}
         reliability_dict = {}
@@ -138,8 +176,37 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
                 h, w = color.shape[:2]
                 mask_o = cv2.resize(mask_o, (int(w / self.scale_ratio), int(h / self.scale_ratio))) > 127
                 color = cv2.resize(color, (int(w / self.scale_ratio), int(h / self.scale_ratio)))
-                depth = cv2.resize(depth, (int(w / self.scale_ratio), int(h / self.scale_ratio)), cv2.INTER_NEAREST) / 1000.
-                depth[(depth < 0.001) | (depth >= self.zfar)] = 0
+                depth = cv2.resize(
+                    depth,
+                    (int(w / self.scale_ratio), int(h / self.scale_ratio)),
+                    cv2.INTER_NEAREST
+                ) / 1000.0
+
+                # On the first frame only: if zfar is too small, fp_filter's cleaning makes the
+                # mask-depth intersection invalid (< 4 valid pixels). This breaks estimator.register().
+                if index == 0:
+                    valid_before = int(np.sum(mask_o & (depth >= 0.001)))
+                    # quick exit: if we already have enough valid pixels, keep default zfar
+                    if valid_before >= 4:
+                        depth_tmp = depth.copy()
+                        depth_tmp[(depth_tmp < 0.001) | (depth_tmp >= self.zfar)] = 0.0
+                        # Replicate estimater.register() early filtering to detect the real failure.
+                        depth_tmp = Utils.erode_depth(depth_tmp.astype(np.float32), radius=2, device='cuda')
+                        depth_tmp = Utils.bilateral_filter_depth(depth_tmp, radius=2, device='cuda')
+                        valid_after_filtered = int(np.sum(mask_o & (depth_tmp >= 0.001)))
+                        if valid_after_filtered < 4:
+                            if self.video_prefix not in error_set:
+                                _append_error_sample(_ERROR_LIST_PATH, self.video_prefix, cache=error_set)
+                            if self.zfar != zfar_fallback:
+                                print(
+                                    f"[fp_filter] low valid pixels after depth cleaning; "
+                                    f"switch zfar {self.zfar} -> {zfar_fallback} for {self.video_prefix}. "
+                                    f"(valid_before={valid_before}, valid_after_filtered={valid_after_filtered})"
+                                )
+                                self.zfar = zfar_fallback
+
+                # Apply zfar clipping (this is what fp_filter passes into estimator.register()).
+                depth[(depth < 0.001) | (depth >= self.zfar)] = 0.0
                 t2 = time.time()
                 # save the color and depth 
 

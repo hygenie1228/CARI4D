@@ -315,12 +315,12 @@ def merge_pickles(videos, args):
                     continue
                 else:
                     dnew[k].append(v)
-            # in the end the poses should be in shape (T, K, 4, 4), where T is the number of frames, K is the number of cameras, 4, 4 is the pose matrix
-            outfile = osp.join(args.outpath, f'{video_prefix}_all.pkl')
-            for k, v in dnew.items():
-                if k in ['frames', 'backward', 'vis_thres']:
-                    continue
-                dnew[k] = np.concatenate(v, axis=1)
-                print(k, dnew[k].shape)
-            joblib.dump(dnew, outfile)
-            print('saved packed results to', outfile)
+        # After all per-camera pickles are merged: poses shape (T, K, 4, 4), T frames, K cameras
+        outfile = osp.join(args.outpath, f'{video_prefix}_all.pkl')
+        for k, v in dnew.items():
+            if k in ['frames', 'backward', 'vis_thres']:
+                continue
+            dnew[k] = np.concatenate(v, axis=1)
+            print(k, dnew[k].shape)
+        joblib.dump(dnew, outfile)
+        print('saved packed results to', outfile)

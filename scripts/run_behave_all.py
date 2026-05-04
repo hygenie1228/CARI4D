@@ -25,7 +25,8 @@ def main() -> None:
         print(f"No experiment folders under {behave}", file=sys.stderr)
         sys.exit(1)
 
-    exp_dirs = exp_dirs[1::2]
+    exp_dirs = exp_dirs[::-1]
+    failures: list[str] = []
     for exp in exp_dirs:
         rel = exp.relative_to(root)
         human_npz = exp / "human" / "human_params.npz"
@@ -34,9 +35,15 @@ def main() -> None:
             print(f"==> {rel} (skip: params already exist)", flush=True)
             continue
         print(f"==> {rel}", flush=True)
-        r = subprocess.run(["bash", str(script), str(rel)], cwd=root)
-        if r.returncode != 0:
-            sys.exit(r.returncode)
+
+        try:
+            r = subprocess.run(["bash", str(script), str(rel)], cwd=root)
+            if r.returncode != 0:
+                sys.exit(r.returncode)
+        except Exception as e:
+            print(f"!!! {rel} failed to start: {e}", file=sys.stderr, flush=True)
+            failures.append(str(rel))
+            continue
 
 
 if __name__ == "__main__":
