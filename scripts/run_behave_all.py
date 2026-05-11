@@ -25,7 +25,7 @@ def main() -> None:
         print(f"No experiment folders under {behave}", file=sys.stderr)
         sys.exit(1)
 
-    exp_dirs = exp_dirs[::-1]
+    exp_dirs = exp_dirs[::3]
     failures: list[str] = []
     for exp in exp_dirs:
         rel = exp.relative_to(root)
@@ -39,11 +39,23 @@ def main() -> None:
         try:
             r = subprocess.run(["bash", str(script), str(rel)], cwd=root)
             if r.returncode != 0:
-                sys.exit(r.returncode)
+                print(
+                    f"!!! {rel} failed with exit code {r.returncode}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                failures.append(str(rel))
+                continue
         except Exception as e:
             print(f"!!! {rel} failed to start: {e}", file=sys.stderr, flush=True)
             failures.append(str(rel))
             continue
+
+    if failures:
+        print("\nFailed samples:", file=sys.stderr)
+        for f in failures:
+            print(f"- {f}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
