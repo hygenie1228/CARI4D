@@ -161,12 +161,11 @@ class FPBehaveVideoProcessor(BaseBehaveVideoData):
 
     def load_template_mesh(self, ret_file=False):
         from behave_data.utils import load_template
-        if self.args.data_source == 'behave':
+        if self.args.data_source in ['behave', 'open4dhoi']:
             mesh_file = self.get_template_file()
             print('Using template mesh from {}'.format(mesh_file))
             mesh = trimesh.load(mesh_file, process=False) # this mesh should have already been centered at origin
-            # get behave mesh template center
-            print("Not loading any behave template!")
+            print("Not loading any dataset template; using staged mesh.")
         elif self.args.data_source == 'hodome':
             obj_name = self.video_prefix.split('_')[2]
             mesh_file = f'data/hodome/obj-newtex/{obj_name}/{obj_name}.obj'

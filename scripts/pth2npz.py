@@ -57,6 +57,7 @@ import os.path as osp
 import re
 import sys
 
+import joblib
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
@@ -182,6 +183,24 @@ def exp_basename_to_video_prefix_and_kid(exp_dir: str) -> tuple[str, int]:
     return base, 0
 
 
+def load_staged_intrinsics(exp_dir: str) -> np.ndarray | None:
+    intr_path = osp.join(exp_dir, "cari4d", "intrinsics.pkl")
+    if not osp.isfile(intr_path):
+        return None
+    data = joblib.load(intr_path)
+    if not isinstance(data, dict):
+        raise TypeError(f"{intr_path} must contain a dict")
+    if "K" in data:
+        K = np.asarray(data["K"], dtype=np.float64)
+        if K.shape != (3, 3):
+            raise ValueError(f"{intr_path} K must be 3x3, got {K.shape}")
+        return np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=np.float64)
+    missing = [k for k in ("fx", "fy", "cx", "cy") if k not in data]
+    if missing:
+        raise KeyError(f"{intr_path} missing intrinsic keys: {', '.join(missing)}")
+    return np.array([data["fx"], data["fy"], data["cx"], data["cy"]], dtype=np.float64)
+
+
 def find_coconet_pth(exp_dir: str, video_prefix: str) -> str:
     """Prefer ``cari4d/coconet/**/{video_prefix}.pth``, else any ``cari4d/**/{video_prefix}.pth``."""
     exp_abs = osp.abspath(exp_dir)
@@ -302,7 +321,7 @@ def main() -> None:
         "--data_source",
         type=str,
         default="behave",
-        choices=["behave", "intercap", "hodome", "imhd", "procigen"],
+        choices=["behave", "intercap", "hodome", "imhd", "procigen", "open4dhoi"],
         help="Dataset name for intrinsics in NPZ (default: behave).",
     )
     parser.add_argument(
@@ -353,8 +372,12 @@ def main() -> None:
 
     seq_name = args.seq_name.strip() or infer_seq_name_from_pth(raw)
     object_name = args.object_name.strip() or infer_object_name(seq_name)
-    K = get_intrinsics_unified(args.data_source, seq_name, kid, wild_video=False)
-    intr = np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=np.float64)
+    intr = load_staged_intrinsics(exp_dir)
+    if intr is None:
+        K = get_intrinsics_unified(args.data_source, seq_name, kid, wild_video=False)
+        intr = np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=np.float64)
+    else:
+        print(f"Using staged intrinsics from {osp.join(exp_dir, 'cari4d', 'intrinsics.pkl')}")
 
     hum_dir = osp.join(exp_dir, "human")
     obj_dir = osp.join(exp_dir, "object")

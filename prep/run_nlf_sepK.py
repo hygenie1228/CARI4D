@@ -188,7 +188,8 @@ def main():
     print(f'in total {len(videos)} videos')
     videos_filter = []
     for video in videos:
-        obj_name = osp.basename(video).split('.')[0].split('_')[2]
+        parts = osp.basename(video).split('.')[0].split('_')
+        obj_name = parts[2] if len(parts) > 2 else parts[0].split('-')[0]
         if obj_name not in EXCLUDE_OBJECTS:
             videos_filter.append(video)
         else:

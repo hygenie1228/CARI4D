@@ -92,7 +92,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
         kids = [cfg.cam_id]
         w2c_rots = [np.eye(3) for _ in kids]
         w2c_trans = [np.zeros(3) for _ in kids]
-        obj_name = seq_name.split('_')[2]
+        parts = seq_name.split('_')
+        obj_name = parts[2] if len(parts) > 2 else seq_name.split('-')[0]
         mesh_tensors, meshes = load_smpl_obj_uvmap(seq_name, use_hy3d=True, meshes_root=cfg.hy3d_meshes_root)
         meshes_any: Any = meshes
         glctx = dr.RasterizeCudaContext()
@@ -356,7 +357,8 @@ class HORefineRunner(BehaveFPNLFRenderer):
                 trans_norm = torch.as_tensor(np.array(args.trans_normalizer), device=device, dtype=torch.float).repeat(
                     len(poses_perturbed), 1)[None]
 
-                obj_name = seq_name.split('_')[2]
+                parts = seq_name.split('_')
+                obj_name = parts[2] if len(parts) > 2 else seq_name.split('-')[0]
                 batch = {
                     **prep, # this contains human pose information
                     "input_rgbs": torch.stack(input_rgbs_final, 0).cuda().float()[None],  # this is rgbB

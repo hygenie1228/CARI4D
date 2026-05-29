@@ -112,7 +112,8 @@ def load_smpl_obj_uvmap(video_prefix, use_hy3d=False, seq_name=None, human_textu
   from behave_data.utils import get_template_path, get_render_template_path_from_seq
   
   torch.set_default_tensor_type('torch.FloatTensor')  # fix bug in pytorch3d loading
-  obj_name = video_prefix.split('_')[2]
+  parts = video_prefix.split('_')
+  obj_name = parts[2] if len(parts) > 2 else video_prefix.split('-')[0]
   file_hy3d = get_hy3d_mesh_file(video_prefix, meshes_root=meshes_root) if use_hy3d else None 
   files = ['data/assets/smpl-meshes/meshlab-corr-order/part_surrel.obj' if human_texture == 'part' else 'assets/smpl-meshes/grey-phosa/smpl_grey_phosa.obj',
            file_hy3d if use_hy3d else get_render_template_path_from_seq(video_prefix)

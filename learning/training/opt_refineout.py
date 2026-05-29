@@ -190,7 +190,8 @@ class RefineOutOptimizer(BaseBehaveVideoData):
         attach_volume(smplh_model, device=self.device) # allows penetration computation 
 
         # load the object mesh template 
-        obj_name = seq_name.split('_')[2]
+        parts = seq_name.split('_')
+        obj_name = parts[2] if len(parts) > 2 else seq_name.split('-')[0]
         if not self.cfg.wild_video:
             crop_center = np.zeros(3) # assume the object is already centered
             
@@ -377,7 +378,7 @@ class RefineOutOptimizer(BaseBehaveVideoData):
         symmetric_objects = ['boxlong', 'boxlarge', 'boxmedium', 'boxsmall', 'boxtiny', 'yogamat', 
                     # 'stool',  'trashbin', 'plasticcontainer', 'tablesquare', 'suitcase', 'backpack', 
                      'obj02', 'obj04', 'obj05', 'obj06']
-        is_symmetric = seq_name.split('_')[2] in symmetric_objects # for these the object temporal smoothness is different 
+        is_symmetric = obj_name in symmetric_objects # for these the object temporal smoothness is different 
 
         # optimization parameters
         opt_params = []
@@ -733,7 +734,8 @@ def main():
         files = files[cfg.index * chunk_size:(cfg.index + 1) * chunk_size]
     for file in files:
         cfg.pth_file = file
-        cfg.data_source = 'intercap' if 'ICap' in file else 'behave'
+        if not cfg.wild_video:
+            cfg.data_source = 'intercap' if 'ICap' in file else 'behave'
 
         opt = RefineOutOptimizer(cfg)
         opt.optimize()

@@ -40,8 +40,13 @@ class BehaveHy3D2DirFPRunner(FPFilterTwoDirProcessor):
                 import importlib.util
 
                 repo = osp.abspath(osp.join(osp.dirname(__file__), ".."))
-                sp = osp.join(repo, "scripts", "stage_exp_behave.py")
-                spec = importlib.util.spec_from_file_location("_stage_behave_mesh", sp)
+                stage_script = (
+                    "stage_exp_open4dhoi.py"
+                    if self.args.data_source == "open4dhoi"
+                    else "stage_exp_behave.py"
+                )
+                sp = osp.join(repo, "scripts", stage_script)
+                spec = importlib.util.spec_from_file_location("_stage_mesh", sp)
                 mod = importlib.util.module_from_spec(spec)
                 assert spec.loader is not None
                 spec.loader.exec_module(mod)

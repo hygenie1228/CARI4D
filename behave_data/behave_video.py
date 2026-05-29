@@ -109,7 +109,7 @@ class BaseBehaveVideoData(object):
             os.makedirs(out_dir, exist_ok=True)
         self.output_path = output_h5_path
 
-        kids, comb = availabe_kindata(input_color, kinect_count=4 if args.data_source != 'intercap' else 6)
+        kids, comb = availabe_kindata(input_color, kinect_count=6 if args.data_source == 'intercap' else 4)
         print("Available kinects for sequence {}: {}".format(osp.basename(input_color), kids))
         self.kids = kids
         kinect_count = len(kids)
@@ -258,7 +258,7 @@ class BaseBehaveVideoData(object):
         parser.add_argument('--nodepth', default=False, action='store_true')
         parser.add_argument('--cameras', default=[0, 1, 2, 3], nargs='+', type=int)
         parser.add_argument('--wild_video', default=False, action='store_true')
-        parser.add_argument('--data_source', default='behave', choices=['behave', 'hodome', 'intercap', 'imhd', 'procigen'])
+        parser.add_argument('--data_source', default='behave', choices=['behave', 'hodome', 'intercap', 'imhd', 'procigen', 'open4dhoi'])
 
         # for debug
         parser.add_argument('--viz_path', default=None)
