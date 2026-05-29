@@ -23,6 +23,7 @@ import joblib
 import h5py
 import torch
 from behave_data.behave_video import BaseBehaveVideoData, load_masks
+from behave_data.masks_h5_io import open_masks_h5
 from behave_data.utils import availabe_kindata
 from lib_smpl import get_smpl, SMPL_MODEL_ROOT
 from tools import icp_utils
@@ -55,7 +56,10 @@ class NLF2Unidepth(BaseBehaveVideoData):
         loop.set_description(f"processing {self.video_prefix}")
         kids = self.kids
 
-        tars = [h5py.File(self.tar_path.replace('_masks_k0.h5', f'_masks_k{k}.h5'), 'r') for k in kids]
+        tars = [
+            open_masks_h5(self.tar_path.replace("_masks_k0.h5", f"_masks_k{k}.h5"), "r")
+            for k in kids
+        ]
 
         # Load NLF prediction and check 
         nlf_file = f'{args.nlf_path}/{self.video_prefix}_params.pkl'

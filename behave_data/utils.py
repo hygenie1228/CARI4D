@@ -85,6 +85,41 @@ def load_kinect_poses_back(config_folder, kids, rotate=False):
     return rotations_back, translations_back
 
 
+def read_nlf_gender_override(cari4d_root: str):
+    """Return ``male``/``female`` if ``<cari4d_root>/nlf_gender.txt`` exists (one line).
+
+    Used for wild-video / InterCap-style experiment folders whose names do not encode
+    BEHAVE subject tokens for ``_sub_gender`` (e.g. ``experiments/intercap_test/10_01_Seg_0_0``).
+    """
+    path = osp.join(osp.abspath(cari4d_root), "nlf_gender.txt")
+    if not osp.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        g = f.read().strip().lower()
+    if g in ("male", "female"):
+        return g
+    return None
+
+
+def find_cari4d_root_from_exp_path(path: str) -> str:
+    """Ascend from ``path`` until a directory named ``cari4d`` is found (staged exp layout).
+
+    Works for ``.../cari4d/videos/*.mp4``, ``.../cari4d/coconet/<run>/*.pth``,
+    ``.../cari4d/opt/<run>/*.pth``, etc.
+    """
+    p = osp.abspath(path)
+    if osp.isfile(p):
+        p = osp.dirname(p)
+    while True:
+        parent = osp.dirname(p)
+        if parent == p:
+            break
+        if osp.basename(p) == "cari4d":
+            return p
+        p = parent
+    return osp.dirname(osp.dirname(osp.abspath(path)))
+
+
 def availabe_kindata(input_video, kinect_count=3):
     # all available kinect videos in this folder, return the list of kinect id, and str representation
     fname_split = os.path.basename(input_video).split('.')

@@ -21,6 +21,7 @@ import os.path as osp
 sys.path.append(os.getcwd())
 import cv2, json 
 import h5py
+from behave_data.masks_h5_io import open_masks_h5
 import torch
 import numpy as np
 import joblib
@@ -139,7 +140,9 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
             vis_thres = args.vis_thres  # 0.7 might be too strong
             print('using visibility threshold: {}'.format(vis_thres))
             poses_i = []
-            tar_mask = h5py.File(self.tar_path.replace('_masks_k0.h5', f'_masks_k{k}.h5'), 'r')
+            tar_mask = open_masks_h5(
+                self.tar_path.replace("_masks_k0.h5", f"_masks_k{k}.h5"), "r"
+            )
 
             index = 0
             t0 = time.time()

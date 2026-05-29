@@ -13,33 +13,32 @@ sys.path.append(os.getcwd())
 from tools import img_utils
 from learning.training.training_config import RefineOutOptimConfig
 from omegaconf import OmegaConf
-import torch, time 
+import torch, time
+import torch.nn.functional as F
 import numpy as np
 import trimesh
 import wandb
 import smplx
 from tqdm import tqdm
 from pytorch3d.transforms.rotation_conversions import axis_angle_to_matrix, matrix_to_axis_angle
-from behave_data.utils import load_template
-from behave_data.const import _sub_gender, BEHAVE_ROOT
+from pytorch3d.renderer import look_at_view_transform
+from behave_data.masks_h5_io import open_masks_h5
+from behave_data.utils import get_intrinsics_unified, load_template, read_nlf_gender_override, find_cari4d_root_from_exp_path
+from behave_data.const import _sub_gender, BEHAVE_ROOT, get_test_view_id
 import os.path as osp
 import cv2
-from pytorch3d.renderer import look_at_view_transform
-import torch.nn.functional as F
 from VolumetricSMPL import attach_volume
 from lib_smpl.body_landmark import BodyLandmarks
 from lib_smpl.th_hand_prior import mean_hand_pose, SMPL_ASSETS_ROOT
 from lib_smpl.const import SMPL_MODEL_ROOT
 from behave_data.behave_video import BaseBehaveVideoData, VideoController
 from transformers import get_scheduler
-from behave_data.const import get_test_view_id
-from behave_data.utils import get_intrinsics_unified
 import h5py
 from pytorch3d.ops.knn import knn_points
 import Utils
 import nvdiffrast.torch as dr
 from glob import glob
-from argparse import Namespace 
+from argparse import Namespace
 from learning.training.training_utils import TrainState
 
 
@@ -49,7 +48,8 @@ class RefineOutOptimizer(BaseBehaveVideoData):
     def __init__(self, cfg: RefineOutOptimConfig):
         seq_name = osp.basename(cfg.pth_file).split('.')[0]
         if cfg.wild_video:
-            view_id = 0
+            # Staged wild videos use ``<seq>.<view>.color.mp4`` (e.g. InterCap); respect ``view_id``.
+            view_id = cfg.view_id if cfg.view_id is not None else 0
         elif cfg.view_id is not None:
             view_id = cfg.view_id
         else:
@@ -167,7 +167,18 @@ class RefineOutOptimizer(BaseBehaveVideoData):
 
         # get subject gender
         seq_name = osp.basename(self.cfg.pth_file).split('.')[0]
-        gender = _sub_gender[seq_name.split('_')[1]]
+        cari4d_root = find_cari4d_root_from_exp_path(self.cfg.pth_file)
+        gender_ov = read_nlf_gender_override(cari4d_root)
+        if gender_ov is not None:
+            gender = gender_ov
+        elif seq_name.split('_')[1] in _sub_gender:
+            gender = _sub_gender[seq_name.split('_')[1]]
+        else:
+            gender = "male"
+            print(
+                f"Warning: no {osp.join(cari4d_root, 'nlf_gender.txt')} and seq token "
+                f"{seq_name.split('_')[1]!r} not in _sub_gender; defaulting gender to {gender!r}"
+            )
         smplh_model = smplx.create(
             model_path=SMPL_MODEL_ROOT,
             model_type='smplh',
@@ -322,7 +333,9 @@ class RefineOutOptimizer(BaseBehaveVideoData):
         rend_size = 256
         focal = np.array([K_full[0, 0], K_full[1, 1]])
         principal_point = np.array([K_full[0, 2], K_full[1, 2]])
-        tar_mask = h5py.File(self.tar_path.replace('_masks_k0.h5', f'_masks_k{view_id}.h5'), 'r')
+        tar_mask = open_masks_h5(
+            self.tar_path.replace("_masks_k0.h5", f"_masks_k{view_id}.h5"), "r"
+        )
         keep_masks, image_refs, K_rois = [], [], [] # keep_mask is occlusion aware, image_ref is the object reference mask
 
         debug_len = self.cfg.batch_size *2 if self.cfg.debug else len(frames_pr)

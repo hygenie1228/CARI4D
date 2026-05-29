@@ -17,6 +17,7 @@ import argparse
 import os
 import re
 import shutil
+import tempfile
 import os.path as osp
 import sys
 import cv2
@@ -78,6 +79,58 @@ def write_obj_aabb_center_at_origin(src_path: str, dst_path: str) -> np.ndarray:
     return center
 
 
+def write_masks_h5_local_then_copy(
+    h5_path: str,
+    video_prefix: str,
+    kid: int,
+    d_human: str,
+    d_obj: str,
+) -> None:
+    """Write mask H5 on local disk, then copy to ``h5_path`` (avoids NFS+h5py hangs)."""
+    cap_h = cv2.VideoCapture(d_human)
+    cap_o = cv2.VideoCapture(d_obj)
+    try:
+        T = min(
+            int(cap_h.get(cv2.CAP_PROP_FRAME_COUNT)),
+            int(cap_o.get(cv2.CAP_PROP_FRAME_COUNT)),
+        )
+        if T <= 0:
+            raise RuntimeError("could not read mask frame counts")
+
+        fd, tmp = tempfile.mkstemp(suffix=".h5", prefix="cari4d_masks_")
+        os.close(fd)
+        try:
+            with h5py.File(tmp, "w") as h5:
+                for i in tqdm(range(T), desc="masks -> h5"):
+                    rh, fh = cap_h.read()
+                    ro, fo = cap_o.read()
+                    if not rh or not ro or fh is None or fo is None:
+                        raise RuntimeError(f"mask videos ended at frame {i}/{T}")
+                    gh = cv2.cvtColor(fh, cv2.COLOR_BGR2GRAY) > 127
+                    go = cv2.cvtColor(fo, cv2.COLOR_BGR2GRAY) > 127
+                    h5.create_dataset(
+                        f"{video_prefix}/{i:06d}-k{kid}.person_mask.png",
+                        data=gh,
+                        compression="gzip",
+                        compression_opts=3,
+                    )
+                    h5.create_dataset(
+                        f"{video_prefix}/{i:06d}-k{kid}.obj_rend_mask.png",
+                        data=go,
+                        compression="gzip",
+                        compression_opts=3,
+                    )
+            if osp.isfile(h5_path):
+                os.remove(h5_path)
+            shutil.copy2(tmp, h5_path)
+        finally:
+            if osp.isfile(tmp):
+                os.remove(tmp)
+    finally:
+        cap_h.release()
+        cap_o.release()
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--exp_dir", type=str, required=True)
@@ -117,11 +170,10 @@ def main() -> None:
             and osp.isfile(depth_out)
             and osp.isfile(h5_path)
         )
-        # isfile() follows symlinks; old *_align.obj symlinks would look "ok" and skip forever.
-        hy_ok = not osp.isfile(src_model) or (
-            osp.isfile(dst_align) and not osp.islink(dst_align)
-        )
-        if core_ok and hy_ok:
+        has_src_mesh = osp.isfile(src_model)
+        align_real = osp.isfile(dst_align) and not osp.islink(dst_align)
+        mesh_gate = (not has_src_mesh) or align_real
+        if core_ok and mesh_gate:
             print(f"skip (outputs exist): {work_root} — use --force to regenerate")
             return
 
@@ -152,37 +204,7 @@ def main() -> None:
     print("copied", d_bgr, "->", depth_out)
 
     os.makedirs(masks_dir, exist_ok=True)
-    cap_h = cv2.VideoCapture(d_human)
-    cap_o = cv2.VideoCapture(d_obj)
-    T = min(int(cap_h.get(cv2.CAP_PROP_FRAME_COUNT)), int(cap_o.get(cv2.CAP_PROP_FRAME_COUNT)))
-    if T <= 0:
-        raise RuntimeError("could not read mask frame counts")
-    if osp.isfile(h5_path):
-        os.remove(h5_path)
-    with h5py.File(h5_path, "w") as h5:
-        for i in tqdm(range(T), desc="masks -> h5"):
-            rh, fh = cap_h.read()
-            ro, fo = cap_o.read()
-            if not rh or not ro or fh is None or fo is None:
-                cap_h.release()
-                cap_o.release()
-                raise RuntimeError(f"mask videos ended at frame {i}/{T}")
-            gh = cv2.cvtColor(fh, cv2.COLOR_BGR2GRAY) > 127
-            go = cv2.cvtColor(fo, cv2.COLOR_BGR2GRAY) > 127
-            h5.create_dataset(
-                f"{video_prefix}/{i:06d}-k{kid}.person_mask.png",
-                data=gh,
-                compression="gzip",
-                compression_opts=3,
-            )
-            h5.create_dataset(
-                f"{video_prefix}/{i:06d}-k{kid}.obj_rend_mask.png",
-                data=go,
-                compression="gzip",
-                compression_opts=3,
-            )
-    cap_h.release()
-    cap_o.release()
+    write_masks_h5_local_then_copy(h5_path, video_prefix, kid, d_human, d_obj)
     print("wrote", h5_path)
 
     os.makedirs(hy_sub, exist_ok=True)

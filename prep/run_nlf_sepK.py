@@ -8,8 +8,6 @@
 
 import os, sys
 
-import h5py
-
 sys.path.append(os.getcwd())
 import cv2
 import torch
@@ -24,7 +22,8 @@ from behave_data.behave_video import BaseBehaveVideoData
 from tools import img_utils
 from lib_smpl import get_smpl, SMPL_MODEL_ROOT
 from behave_data.const import _sub_gender, EXCLUDE_OBJECTS
-from behave_data.utils import get_intrinsics_unified
+from behave_data.masks_h5_io import open_masks_h5
+from behave_data.utils import get_intrinsics_unified, read_nlf_gender_override
 
 NLF_MODEL_PATH = 'weights/nlf_l_multi_0.3.2.torchscript'
 
@@ -38,12 +37,16 @@ class ViewSpecificNLFRunner(BaseBehaveVideoData):
             return
         model = torch.jit.load(NLF_MODEL_PATH).cuda().eval() if model is None else model # works better for torch>=2.4
         device = 'cuda'
-        gender = _sub_gender[self.video_prefix.split('_')[1]]
+        video_abs = osp.abspath(args.video)
+        cari4d_root = osp.dirname(osp.dirname(video_abs))
+        gender_ov = read_nlf_gender_override(cari4d_root)
+        if gender_ov is not None:
+            gender = gender_ov
+        else:
+            gender = _sub_gender[self.video_prefix.split('_')[1]]
         fitter_smplh = BodyFitter(BodyModel('smplh', gender, model_root=SMPL_MODEL_ROOT + '/smplh').to('cuda')).to(device)
         
         if args.wild_video:
-            video_abs = osp.abspath(args.video)
-            cari4d_root = osp.dirname(osp.dirname(video_abs))
             intr_path = osp.join(cari4d_root, "intrinsics.pkl")
             if self.args.data_source == "behave" and osp.isfile(intr_path):
                 d = joblib.load(intr_path)
@@ -71,7 +74,10 @@ class ViewSpecificNLFRunner(BaseBehaveVideoData):
 
         nlf_data = {}
         kids = self.kids
-        tars = [h5py.File(self.tar_path.replace('_masks_k0.h5', f'_masks_k{k}.h5'), 'r') for k in kids]
+        tars = [
+            open_masks_h5(self.tar_path.replace("_masks_k0.h5", f"_masks_k{k}.h5"), "r")
+            for k in kids
+        ]
         for kid_idx, kid in enumerate(self.kids):
             nlf_data[kid] = {
                 'poses': [],

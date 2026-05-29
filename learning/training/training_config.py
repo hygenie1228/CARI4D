@@ -447,6 +447,8 @@ class TrainTemporalRefinerConfig:
     cam_id: int = 1
     refine_iters: int = 1
     wild_video: bool = False
+    # Passed to BehaveRenderer / video loaders for HORefine (wild InterCap etc.); must exist for CLI merge.
+    data_source: str = 'behave'
     masks_root: str = 'data/behave/masks-h5-my'
     hy3d_meshes_root: str = 'data/cari4d-demo/behave/meshes'
     fp_root: str = 'data/behave/fp'

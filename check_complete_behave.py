@@ -4,18 +4,18 @@ from pathlib import Path
 
 
 def main() -> None:
-    intercap_root = Path(__file__).resolve().parent / "experiments" / "intercap"
+    behave_root = Path(__file__).resolve().parent / "experiments" / "behave"
 
-    if not intercap_root.exists() or not intercap_root.is_dir():
-        print(f"[ERROR] Directory not found: {intercap_root}")
+    if not behave_root.exists() or not behave_root.is_dir():
+        print(f"[ERROR] Directory not found: {behave_root}")
         return
 
     sample_dirs = sorted(
-        p for p in intercap_root.iterdir() if p.is_dir() and not p.name.startswith(".")
+        p for p in behave_root.iterdir() if p.is_dir() and not p.name.startswith(".")
     )
 
     if not sample_dirs:
-        print(f"[INFO] No sample directories found in: {intercap_root}")
+        print(f"[INFO] No sample directories found in: {behave_root}")
         return
 
     incomplete_samples = []

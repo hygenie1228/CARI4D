@@ -27,7 +27,8 @@ from typing import Any
 import Utils
 from Utils import load_smpl_obj_uvmap
 from tools import img_utils
-from behave_data.utils import load_kinect_poses_back, init_video_controllers
+from behave_data.masks_h5_io import open_masks_h5
+from behave_data.utils import load_kinect_poses_back, init_video_controllers, read_nlf_gender_override
 from lib_smpl import get_smpl
 from lib_smpl.body_landmark import BodyLandmarks
 from behave_data.const import _sub_gender
@@ -52,7 +53,7 @@ class HORefineRunner(BehaveFPNLFRenderer):
         # read h5 file
         h5_path = f'{cfg.masks_root}/{video_prefix}_masks_k{args.cam_id}.h5'
         print(f'loading masks from {h5_path}')
-        tar_mask = h5py.File(h5_path, 'r')
+        tar_mask = open_masks_h5(h5_path, "r")
         return controllers, tar_mask
 
     @torch.no_grad()
@@ -143,7 +144,10 @@ class HORefineRunner(BehaveFPNLFRenderer):
         frames_packed = packed['frames']
         # take the frames as the joint set
         frames_packed = [x for x in frames_packed if x in nlf_data['frames']]
-        body_model = get_smpl(_sub_gender[video_prefix.split('_')[1]], hands=True).to(device)
+        cari4d_root = osp.dirname(osp.dirname(osp.abspath(args.video)))
+        gender_ov = read_nlf_gender_override(cari4d_root)
+        smpl_gender = gender_ov if gender_ov is not None else _sub_gender[video_prefix.split('_')[1]]
+        body_model = get_smpl(smpl_gender, hands=True).to(device)
         betas_avg = np.mean(packed['betas'].reshape((-1, 10)), 0)
         mesh_diameter = self.get_smpl_diameter(betas_avg, body_model)
         clip_len = int(getattr(cfg, 'clip_len', 16))
@@ -622,6 +626,7 @@ def main():
     from argparse import Namespace
     from glob import glob
 
+    from omegaconf import OmegaConf
     from learning.training.trainer import get_config
     cfg = get_config()
 
@@ -658,9 +663,9 @@ def main():
             rend_size=224,
             skip=1,
             add_rgb=False,
-            data_source='behave',
+            data_source=OmegaConf.select(cfg, 'data_source', default='behave'),
         )
-        args.wild_video = cfg.wild_video
+        args.wild_video = bool(OmegaConf.select(cfg, 'wild_video', default=False))
         args.cam_id = cfg.cam_id
 
         runner = HORefineRunner(args)

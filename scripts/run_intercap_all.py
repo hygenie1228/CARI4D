@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-"""Run scripts/run_behave.sh once per subdirectory of experiments/behave."""
+"""Run scripts/run_intercap.sh once per subdirectory of experiments/intercap
 
+InterCap-style folders do not encode a Kinect/view id in the directory name. Use the
+environment variable ``ICAP_VIEW`` (default ``0`` in ``run_intercap.sh``) for the
+camera index passed to staging, FP, CoCoNet, opt, and NPZ export.
+"""
+
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,29 +14,26 @@ from pathlib import Path
 
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
-    behave = root / "experiments" / "behave"
-    script = root / "scripts" / "run_behave.sh"
+    intercap_root = root / "experiments" / "intercap"
+    script = root / "scripts" / "run_intercap.sh"
 
-    if not behave.is_dir():
-        print(f"Missing directory: {behave}", file=sys.stderr)
+    if not intercap_root.is_dir():
+        print(f"Missing directory: {intercap_root}", file=sys.stderr)
         sys.exit(1)
     if not script.is_file():
         print(f"Missing script: {script}", file=sys.stderr)
         sys.exit(1)
 
     exp_dirs = sorted(
-        p for p in behave.iterdir() if p.is_dir() and not p.name.startswith(".")
+        p for p in intercap_root.iterdir() if p.is_dir() and not p.name.startswith(".")
     )
     if not exp_dirs:
-        print(f"No experiment folders under {behave}", file=sys.stderr)
+        print(f"No experiment folders under {intercap_root}", file=sys.stderr)
         sys.exit(1)
 
-    exp_dirs = exp_dirs[::1]
+    exp_dirs = exp_dirs[::-1]
     failures: list[str] = []
     for exp in exp_dirs:
-        if "Date03_Sub04_tablesquare_lift_3" not in str(exp):
-            continue
-
         rel = exp.relative_to(root)
         human_npz = exp / "human" / "human_params.npz"
         object_npz = exp / "object" / "object_params.npz"
@@ -39,8 +42,9 @@ def main() -> None:
             continue
         print(f"==> {rel}", flush=True)
 
+        env = os.environ.copy()
         try:
-            r = subprocess.run(["bash", str(script), str(rel)], cwd=root)
+            r = subprocess.run(["bash", str(script), str(rel)], cwd=root, env=env)
             if r.returncode != 0:
                 print(
                     f"!!! {rel} failed with exit code {r.returncode}",

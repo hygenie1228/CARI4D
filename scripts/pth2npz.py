@@ -298,6 +298,21 @@ def main() -> None:
         default=-1,
         help="Kinect id for get_intrinsics_unified; default: from exp_dir basename _<id>, else 0",
     )
+    parser.add_argument(
+        "--data_source",
+        type=str,
+        default="behave",
+        choices=["behave", "intercap", "hodome", "imhd", "procigen"],
+        help="Dataset name for intrinsics in NPZ (default: behave).",
+    )
+    parser.add_argument(
+        "--full_basename_as_prefix",
+        action="store_true",
+        help=(
+            "Use the full exp_dir basename as video_prefix and ignore trailing _<digits> "
+            "(InterCap test folders such as 10_01_Seg_0_0)."
+        ),
+    )
     parser.add_argument("--gender", type=str, default="male", help="SMPL-H gender")
     parser.add_argument(
         "--object_name",
@@ -308,7 +323,11 @@ def main() -> None:
     args = parser.parse_args()
 
     exp_dir = osp.abspath(args.exp_dir)
-    video_prefix, kid_default = exp_basename_to_video_prefix_and_kid(exp_dir)
+    if args.full_basename_as_prefix:
+        video_prefix = osp.basename(exp_dir.rstrip("/"))
+        kid_default = 0
+    else:
+        video_prefix, kid_default = exp_basename_to_video_prefix_and_kid(exp_dir)
     kid = kid_default if args.kid < 0 else args.kid
     include_coconet = bool(args.coconet_pth.strip())
     done, expected = all_outputs_exist(exp_dir, include_coconet)
@@ -334,7 +353,7 @@ def main() -> None:
 
     seq_name = args.seq_name.strip() or infer_seq_name_from_pth(raw)
     object_name = args.object_name.strip() or infer_object_name(seq_name)
-    K = get_intrinsics_unified("behave", seq_name, kid, wild_video=False)
+    K = get_intrinsics_unified(args.data_source, seq_name, kid, wild_video=False)
     intr = np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2]], dtype=np.float64)
 
     hum_dir = osp.join(exp_dir, "human")

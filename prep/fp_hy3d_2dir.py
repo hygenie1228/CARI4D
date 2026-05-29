@@ -19,12 +19,51 @@ import os.path as osp
 class BehaveHy3D2DirFPRunner(FPFilterTwoDirProcessor):
     def get_template_file(self):
         "load from hy3d"
-        obj_name = self.video_prefix.split('_')[2]
-        files = sorted(glob(f'{self.args.hy3d_root}/{self.video_prefix}*/*{self.video_prefix}*_align.obj'))
+        root = osp.normpath(self.args.hy3d_root)
+        vp = self.video_prefix
+        # Exact layout from scripts/stage_exp_behave.py / stage_exp_intercap.py (glob can miss on some trees).
+        direct = osp.join(root, f"{vp}_export", f"{vp}_align.obj")
+        if osp.isfile(direct) and not osp.islink(direct):
+            print("using object template from file:", direct)
+            return direct
+        # Standard wild layout: <exp>/cari4d/hy3d_staged — build centered align from object/model.obj
+        if (
+            osp.basename(root) == "hy3d_staged"
+            and osp.basename(osp.dirname(root)) == "cari4d"
+        ):
+            exp_dir = osp.dirname(osp.dirname(root))
+            raw_obj = osp.join(exp_dir, "object", "model.obj")
+            if osp.isfile(raw_obj):
+                os.makedirs(osp.dirname(direct), exist_ok=True)
+                if osp.lexists(direct):
+                    os.remove(direct)
+                import importlib.util
+
+                repo = osp.abspath(osp.join(osp.dirname(__file__), ".."))
+                sp = osp.join(repo, "scripts", "stage_exp_behave.py")
+                spec = importlib.util.spec_from_file_location("_stage_behave_mesh", sp)
+                mod = importlib.util.module_from_spec(spec)
+                assert spec.loader is not None
+                spec.loader.exec_module(mod)
+                mod.write_obj_aabb_center_at_origin(raw_obj, direct)
+                print(f"[fp_hy3d_2dir] staged centered mesh {raw_obj} -> {direct}")
+                return direct
+        pat = osp.join(root, f"{vp}*", f"*{vp}*_align.obj")
+        files = sorted(glob(pat))
         if len(files) == 0:
-            raise ValueError(f'no aligned hy3d template found for {self.video_prefix}')
+            hint = ""
+            if (
+                osp.basename(root) == "hy3d_staged"
+                and osp.basename(osp.dirname(root)) == "cari4d"
+            ):
+                ed = osp.dirname(osp.dirname(root))
+                hint = f"; expected source OBJ at {osp.join(ed, 'object', 'model.obj')}"
+            raise ValueError(
+                f"no aligned hy3d template for {vp!r} under {root!r} "
+                f"(tried {direct!r}, glob {pat!r}{hint})"
+            )
         mesh_file = files[0]
-        print('using object template from file:', mesh_file)
+        print("using object template from file:", mesh_file)
         return mesh_file
 
 def _child_run_kid(kid, args):

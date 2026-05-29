@@ -17,7 +17,7 @@ from glob import glob
 from os import path as osp
 
 import imageio
-from h5py import File
+from behave_data.masks_h5_io import open_masks_h5
 
 sys.path.append(os.getcwd())
 import cv2
@@ -75,7 +75,9 @@ class FPBehaveVideoProcessor(BaseBehaveVideoData):
         reinit_every = args.reinit_every if args.reinit_every is not None else len(self.times) + 10
 
         for enum_idx, k in enumerate(kids):
-            tar_mask = h5py.File(self.tar_path.replace('_masks_k0.h5', f'_masks_k{k}.h5'), 'r')
+            tar_mask = open_masks_h5(
+                self.tar_path.replace("_masks_k0.h5", f"_masks_k{k}.h5"), "r"
+            )
             if kid_to_run is not None and k != kid_to_run:
                 continue
             print(f'Processing view {k}')
