@@ -119,10 +119,49 @@ def pose_abs_to_object_npz_fields(pose_abs: np.ndarray) -> tuple[np.ndarray, np.
     pose_abs = np.asarray(pose_abs, dtype=np.float64)
     if pose_abs.ndim != 3 or pose_abs.shape[-2:] != (4, 4):
         raise ValueError(f"pose_abs must be (T, 4, 4), got {pose_abs.shape}")
-    R_mats = pose_abs[:, :3, :3]
+    pose_abs = repair_pose_abs_for_export(pose_abs)
+    R_mats = project_rotations_to_so3(pose_abs[:, :3, :3])
     transl = pose_abs[:, :3, 3].astype(np.float64)
     rotvec = R.from_matrix(R_mats).as_rotvec().astype(np.float64)
     return rotvec, transl
+
+
+def repair_pose_abs_for_export(pose_abs: np.ndarray) -> np.ndarray:
+    repaired = pose_abs.copy()
+    flat = repaired.reshape(repaired.shape[0], -1)
+    finite_rows = np.isfinite(flat).all(axis=1)
+    if finite_rows.all():
+        return repaired
+
+    bad = np.flatnonzero(~finite_rows)
+    good = np.flatnonzero(finite_rows)
+    print(f"Repairing {len(bad)} non-finite pose_abs rows for NPZ export")
+    if len(good) == 0:
+        repaired[:] = np.eye(4, dtype=np.float64)
+        return repaired
+
+    for row in bad:
+        nearest = good[np.argmin(np.abs(good - row))]
+        repaired[row] = repaired[nearest]
+    return repaired
+
+
+def project_rotations_to_so3(R_mats: np.ndarray) -> np.ndarray:
+    projected = np.empty_like(R_mats, dtype=np.float64)
+    for i, mat in enumerate(R_mats):
+        if not np.isfinite(mat).all():
+            projected[i] = np.eye(3, dtype=np.float64)
+            continue
+        try:
+            u, _, vh = np.linalg.svd(mat)
+            rot = u @ vh
+            if np.linalg.det(rot) < 0:
+                u[:, -1] *= -1
+                rot = u @ vh
+            projected[i] = rot
+        except np.linalg.LinAlgError:
+            projected[i] = np.eye(3, dtype=np.float64)
+    return projected
 
 
 def tensor_to_numpy_f32(x: torch.Tensor) -> np.ndarray:

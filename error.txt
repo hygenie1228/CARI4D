@@ -1,0 +1,392 @@
+time: 2026-06-30T12:05:31.114717+00:00
+sample: experiments/open4dhoi/trashcan-20250912_195725
+exit code: 1
+
+time: 2026-06-30T12:06:31.867848+00:00
+sample: experiments/open4dhoi/stone_pillar-20251027_144412
+exit code: 1
+
+time: 2026-06-30T12:06:32.191977+00:00
+sample: experiments/open4dhoi/spiked_mace-20260215_153642_b892f4c9_part03
+exit code: 1
+
+time: 2026-06-30T12:06:46.883889+00:00
+sample: experiments/open4dhoi/stone_pillar-20251027_144412
+exit code: 1
+
+time: 2026-06-30T12:06:47.196202+00:00
+sample: experiments/open4dhoi/spiked_mace-20260215_153642_b892f4c9_part03
+exit code: 1
+
+time: 2026-06-30T13:01:13.861938+00:00
+sample: experiments/open4dhoi/speaker-20250912_195423
+exit code: 1
+
+time: 2026-06-30T13:06:38.532545+00:00
+sample: experiments/open4dhoi/sofa-20251027_144310
+exit code: 1
+
+time: 2026-06-30T14:24:05.037527+00:00
+sample: experiments/open4dhoi/sofa-20251027_144255
+exit code: 1
+
+time: 2026-06-30T14:30:42.460526+00:00
+sample: experiments/open4dhoi/sofa-20251027_144255
+exit code: 1
+
+time: 2026-06-30T15:17:57.961921+00:00
+sample: experiments/open4dhoi/shelf-20251027_144120
+exit code: 1
+
+time: 2026-06-30T15:20:52.250510+00:00
+sample: experiments/open4dhoi/sofa-20250925_114918
+exit code: 1
+
+time: 2026-06-30T15:42:09.606674+00:00
+sample: experiments/open4dhoi/stone_pillar-20251027_144412
+exit code: 1
+
+time: 2026-06-30T15:42:09.929355+00:00
+sample: experiments/open4dhoi/spiked_mace-20260215_153642_b892f4c9_part03
+exit code: 1
+
+time: 2026-06-30T15:42:47.694794+00:00
+sample: experiments/open4dhoi/sofa-20251027_144310
+exit code: 1
+
+time: 2026-06-30T15:43:23.230673+00:00
+sample: experiments/open4dhoi/sofa-20251027_144255
+exit code: 1
+
+time: 2026-06-30T15:43:58.276081+00:00
+sample: experiments/open4dhoi/sofa-20250925_114918
+exit code: 1
+
+time: 2026-06-30T16:33:11.850619+00:00
+sample: experiments/open4dhoi/sofa-20250901_210809
+exit code: 1
+
+time: 2026-06-30T16:33:39.990920+00:00
+sample: experiments/open4dhoi/slipper-20250727_161755
+exit code: 1
+
+time: 2026-06-30T16:37:40.348450+00:00
+sample: experiments/open4dhoi/sofa-20250901_210809
+exit code: 1
+
+time: 2026-06-30T16:38:09.541446+00:00
+sample: experiments/open4dhoi/slipper-20250727_161755
+exit code: 1
+
+time: 2026-06-30T16:52:04.204669+00:00
+sample: experiments/open4dhoi/piano-20251027_143814
+exit code: 1
+
+time: 2026-06-30T16:56:12.509790+00:00
+sample: experiments/open4dhoi/juicer-20251027_143609
+exit code: 1
+
+time: 2026-06-30T17:25:57.758087+00:00
+sample: experiments/open4dhoi/shelf-20251027_144142
+exit code: 1
+
+time: 2026-06-30T17:39:12.506753+00:00
+sample: experiments/open4dhoi/ottoman-20251018_213428
+exit code: 1
+
+time: 2026-06-30T17:48:13.216245+00:00
+sample: experiments/open4dhoi/pillar-20251027_143925
+exit code: 1
+
+time: 2026-06-30T17:48:51.320746+00:00
+sample: experiments/open4dhoi/piano-20251027_143814
+exit code: 1
+
+time: 2026-06-30T17:48:51.623895+00:00
+sample: experiments/open4dhoi/shelf-20251027_144142
+exit code: 1
+
+time: 2026-06-30T17:49:32.415847+00:00
+sample: experiments/open4dhoi/pillar-20251027_143925
+exit code: 1
+
+time: 2026-06-30T17:50:08.619296+00:00
+sample: experiments/open4dhoi/piano-20251027_143814
+exit code: 1
+
+time: 2026-06-30T18:11:15.945901+00:00
+sample: experiments/open4dhoi/ottoman-20251018_213501
+exit code: 1
+
+time: 2026-06-30T18:11:56.333193+00:00
+sample: experiments/open4dhoi/ottoman-20251018_213428
+exit code: 1
+
+time: 2026-06-30T18:12:31.954818+00:00
+sample: experiments/open4dhoi/juicer-20251027_143609
+exit code: 1
+
+time: 2026-06-30T18:16:10.522616+00:00
+sample: experiments/open4dhoi/guitar-20250827_155827
+exit code: 1
+
+time: 2026-06-30T18:24:19.538129+00:00
+sample: experiments/open4dhoi/ottoman-20251018_213501
+exit code: 1
+
+time: 2026-06-30T18:24:55.629985+00:00
+sample: experiments/open4dhoi/piano-20251027_143814
+exit code: 1
+
+time: 2026-06-30T18:25:32.555700+00:00
+sample: experiments/open4dhoi/shelf-20251027_144120
+exit code: 1
+
+time: 2026-06-30T18:26:09.937591+00:00
+sample: experiments/open4dhoi/sofa-20251027_144255
+exit code: 1
+
+time: 2026-06-30T18:26:45.407057+00:00
+sample: experiments/open4dhoi/speaker-20250912_195423
+exit code: 1
+
+time: 2026-06-30T18:26:45.709933+00:00
+sample: experiments/open4dhoi/spiked_mace-20260215_153642_b892f4c9_part03
+exit code: 1
+
+time: 2026-06-30T18:27:22.350750+00:00
+sample: experiments/open4dhoi/stone_pillar-20251027_144412
+exit code: 1
+
+time: 2026-06-30T18:36:06.482631+00:00
+sample: experiments/open4dhoi/piano-20251001_170159
+exit code: 1
+
+time: 2026-06-30T18:36:42.523521+00:00
+sample: experiments/open4dhoi/ottoman-20251018_213501
+exit code: 1
+
+time: 2026-06-30T18:41:30.128231+00:00
+sample: experiments/open4dhoi/piano-20251001_170159
+exit code: 1
+
+time: 2026-06-30T18:42:05.377366+00:00
+sample: experiments/open4dhoi/ottoman-20251018_213501
+exit code: 1
+
+time: 2026-06-30T19:06:35.304558+00:00
+sample: experiments/open4dhoi/egg_sofa-20251027_143452
+exit code: 1
+
+time: 2026-06-30T19:17:25.306926+00:00
+sample: experiments/open4dhoi/glass-20251001_165756
+exit code: 1
+
+time: 2026-06-30T19:26:55.278454+00:00
+sample: experiments/open4dhoi/ottoman-20251018_213450
+exit code: 1
+
+time: 2026-06-30T19:27:31.564399+00:00
+sample: experiments/open4dhoi/juicer-20251027_143609
+exit code: 1
+
+time: 2026-06-30T19:28:06.653440+00:00
+sample: experiments/open4dhoi/guitar-20250827_155827
+exit code: 1
+
+time: 2026-06-30T19:28:41.714486+00:00
+sample: experiments/open4dhoi/glass-20251001_165756
+exit code: 1
+
+time: 2026-06-30T19:52:13.665253+00:00
+sample: experiments/open4dhoi/ottoman-20251018_213450
+exit code: 1
+
+time: 2026-06-30T19:52:51.359332+00:00
+sample: experiments/open4dhoi/juicer-20251027_143609
+exit code: 1
+
+time: 2026-06-30T19:53:27.579830+00:00
+sample: experiments/open4dhoi/guitar-20250827_155827
+exit code: 1
+
+time: 2026-06-30T19:54:06.005595+00:00
+sample: experiments/open4dhoi/glass-20251001_165756
+exit code: 1
+
+time: 2026-06-30T20:19:21.684299+00:00
+sample: experiments/open4dhoi/egg_sofa-20251027_143518
+exit code: 1
+
+time: 2026-06-30T20:34:39.686414+00:00
+sample: experiments/open4dhoi/egg_sofa-20251027_143518
+exit code: 1
+
+time: 2026-06-30T20:35:15.060064+00:00
+sample: experiments/open4dhoi/egg_sofa-20251027_143452
+exit code: 1
+
+time: 2026-06-30T20:58:08.904974+00:00
+sample: experiments/open4dhoi/deck_chair-20250901_204657
+exit code: 1
+
+time: 2026-06-30T21:27:03.833291+00:00
+sample: experiments/open4dhoi/cup-20250724_220010
+exit code: 1
+
+time: 2026-06-30T21:30:31.760720+00:00
+sample: experiments/open4dhoi/egg_sofa-20251027_143518
+exit code: 1
+
+time: 2026-06-30T21:31:09.069557+00:00
+sample: experiments/open4dhoi/egg_sofa-20251027_143452
+exit code: 1
+
+time: 2026-06-30T21:31:44.529233+00:00
+sample: experiments/open4dhoi/cup-20250724_220010
+exit code: 1
+
+time: 2026-06-30T22:10:01.814472+00:00
+sample: experiments/open4dhoi/dumbell-20250729_235623
+exit code: 1
+
+time: 2026-06-30T22:15:10.509358+00:00
+sample: experiments/open4dhoi/cup-20250724_220010
+exit code: 1
+
+time: 2026-06-30T22:41:40.325137+00:00
+sample: experiments/open4dhoi/chair-20251018_213158
+exit code: 1
+
+time: 2026-06-30T22:41:40.677270+00:00
+sample: experiments/open4dhoi/bucket-20250824_233943
+exit code: 1
+
+time: 2026-06-30T22:42:17.310930+00:00
+sample: experiments/open4dhoi/apple-20250825_200306
+exit code: 1
+
+time: 2026-06-30T23:15:22.306215+00:00
+sample: experiments/open4dhoi/chair-20251018_213214
+exit code: 1
+
+time: 2026-06-30T23:15:57.648494+00:00
+sample: experiments/open4dhoi/chair-20251018_213158
+exit code: 1
+
+time: 2026-06-30T23:20:15.341799+00:00
+sample: experiments/open4dhoi/chair-20251018_213202
+exit code: 1
+
+time: 2026-06-30T23:28:36.513439+00:00
+sample: experiments/open4dhoi/block-20251018_212657
+exit code: 1
+
+time: 2026-06-30T23:35:07.644921+00:00
+sample: experiments/open4dhoi/chair-20251018_213158
+exit code: 1
+
+time: 2026-06-30T23:35:07.994691+00:00
+sample: experiments/open4dhoi/bucket-20250824_233943
+exit code: 1
+
+time: 2026-06-30T23:35:44.510699+00:00
+sample: experiments/open4dhoi/apple-20250825_200306
+exit code: 1
+
+time: 2026-06-30T23:44:34.547530+00:00
+sample: experiments/open4dhoi/basketball-20250827_153604_2
+exit code: 1
+
+time: 2026-07-01T00:31:24.948569+00:00
+sample: experiments/open4dhoi/chair-20250909_133508
+exit code: 1
+
+time: 2026-07-01T00:31:25.292669+00:00
+sample: experiments/open4dhoi/bucket-20250824_233943
+exit code: 1
+
+time: 2026-07-01T00:31:50.550170+00:00
+sample: experiments/open4dhoi/brush-20250901_204341
+exit code: 1
+
+time: 2026-07-01T00:53:27.969776+00:00
+sample: experiments/open4dhoi/accordion-20250920_195801
+exit code: 1
+
+time: 2026-07-01T01:54:59.651710+00:00
+sample: experiments/open4dhoi/accordion-20250920_195801
+exit code: 1
+
+time: 2026-07-01T02:27:08.495444+00:00
+sample: experiments/open4dhoi/block-20251018_212739
+exit code: 1
+
+time: 2026-07-01T03:02:25.732986+00:00
+sample: experiments/open4dhoi/accordion-20250920_195801
+exit code: 1
+
+time: 2026-07-01T04:35:57.237052+00:00
+sample: experiments/open4dhoi/table-20251018_213538
+exit code: 1
+
+time: 2026-07-01T04:36:41.479525+00:00
+sample: experiments/open4dhoi/eraser-20250909_153333
+exit code: 1
+
+time: 2026-07-01T04:54:39.168642+00:00
+sample: experiments/open4dhoi/snowboard-20260215_154125_bbd6fa8b
+exit code: 1
+
+time: 2026-07-01T04:55:07.452254+00:00
+sample: experiments/open4dhoi/slipper-20250727_161755
+exit code: 1
+
+time: 2026-07-01T04:55:43.116341+00:00
+sample: experiments/open4dhoi/skateboard-20250902_171622_part_01
+exit code: 1
+
+time: 2026-07-01T05:31:29.486723+00:00
+sample: experiments/open4dhoi/eraser-20250909_153333
+exit code: 1
+
+time: 2026-07-01T05:50:55.997652+00:00
+sample: experiments/open4dhoi/eraser-20250909_153333
+exit code: 1
+
+time: 2026-07-01T06:00:06.274842+00:00
+sample: experiments/open4dhoi/bucket-20250824_233943
+exit code: 1
+
+time: 2026-07-01T06:00:18.742622+00:00
+sample: experiments/open4dhoi/brush-20250901_204341
+exit code: 1
+
+time: 2026-07-01T06:00:25.934187+00:00
+sample: experiments/open4dhoi/badminton_racket-20250917_201914
+exit code: 1
+
+time: 2026-07-01T06:01:55.958916+00:00
+sample: experiments/open4dhoi/brush-20250901_204341
+exit code: 1
+
+time: 2026-07-01T06:03:00.979440+00:00
+sample: experiments/open4dhoi/brush-20250901_204341
+exit code: 1
+
+time: 2026-07-01T06:03:05.502138+00:00
+sample: experiments/open4dhoi/brush-20250901_204341
+exit code: 1
+
+time: 2026-07-01T06:04:00.852163+00:00
+sample: experiments/open4dhoi/brush-20250901_204341
+exit code: 1
+
+time: 2026-07-01T06:13:59.922881+00:00
+sample: experiments/open4dhoi/badminton_racket-20250917_201914
+exit code: 1
+
+time: 2026-07-01T06:30:41.007055+00:00
+sample: experiments/open4dhoi/badminton_racket-20250917_201914
+exit code: 1
+

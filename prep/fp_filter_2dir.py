@@ -96,11 +96,15 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
         # the number of valid depth pixels inside the object mask becomes < 4 for the first frame.
         # In that case, estimator.register() can crash early. We record the sequence in error_list.txt and
         # then switch zfar to a safer (larger) value for that sequence only.
-        error_set = _load_error_set(_ERROR_LIST_PATH)
-        zfar_default = 3.8 if self.args.data_source in ['behave', 'intercap'] and not self.args.wild_video else 8.0
-        zfar_fallback = 50.0
-        self.zfar = zfar_fallback if self.video_prefix in error_set else zfar_default
-        print(f"[fp_filter] zfar={self.zfar} (video_prefix={self.video_prefix}, wild={self.args.wild_video})")
+        if args.zfar is not None:
+            self.zfar = float(args.zfar)
+            print(f"[fp_filter] zfar={self.zfar} (explicit --zfar, video_prefix={self.video_prefix})")
+        else:
+            error_set = _load_error_set(_ERROR_LIST_PATH)
+            zfar_default = 3.8 if self.args.data_source in ['behave', 'intercap'] and not self.args.wild_video else 8.0
+            zfar_fallback = 50.0
+            self.zfar = zfar_fallback if self.video_prefix in error_set else zfar_default
+            print(f"[fp_filter] zfar={self.zfar} (video_prefix={self.video_prefix}, wild={self.args.wild_video})")
         pose_dict, pose_hist_dict = {}, {}
         pose_best_dict = {}
         reliability_dict = {}
@@ -187,7 +191,9 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
 
                 # On the first frame only: if zfar is too small, fp_filter's cleaning makes the
                 # mask-depth intersection invalid (< 4 valid pixels). This breaks estimator.register().
-                if index == 0:
+                if index == 0 and args.zfar is None:
+                    error_set = _load_error_set(_ERROR_LIST_PATH)
+                    zfar_fallback = 50.0
                     valid_before = int(np.sum(mask_o & (depth >= 0.001)))
                     # quick exit: if we already have enough valid pixels, keep default zfar
                     if valid_before >= 4:
@@ -227,11 +233,15 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
 
                 # check if there is one good candidate
                 if est.poses is None:
-                    assert index == 0, f'no pose found for frame {frame_time}'
-                    est.poses = torch.eye(4)[None].repeat(est.rot_grid.shape[0]*2, 1, 1).cuda() 
-                    print(f"no pose found for frame {frame_time}, set to identity")
-                    est.poses[:, :3, :3] = torch.cat([est.rot_grid[:, :3, :3].clone(), est.rot_grid[:, :3, :3].clone()], 0)
-                    est.poses[:, :3, 3] = torch.tensor([0, 0, 2.2]).cuda() # set tod a dummy pose so that bbox can be non-zero 
+                    if pose_last is None:
+                        est.poses = torch.eye(4)[None].repeat(est.rot_grid.shape[0]*2, 1, 1).cuda()
+                        print(f"no pose found for frame {frame_time}, set to identity")
+                        est.poses[:, :3, :3] = torch.cat([est.rot_grid[:, :3, :3].clone(), est.rot_grid[:, :3, :3].clone()], 0)
+                        est.poses[:, :3, 3] = torch.tensor([0, 0, 2.2]).cuda() # set to a dummy pose so that bbox can be non-zero
+                    else:
+                        est.poses = pose_last[None].repeat(est.rot_grid.shape[0]*2, 1, 1)
+                        print(f"no pose found for frame {frame_time}, reuse previous pose")
+                    est.pose_last = est.poses[0]
                 pose_hist_full = torch.stack([p @ tf_to_centered for p in est.poses])  # pose saved to output dict
 
                 pose_cluster = torch.from_numpy(np.stack(cluster_poses(10, 0.1, est.poses.cpu().numpy(), [np.eye(4)]))).cuda().float()
@@ -755,7 +765,12 @@ class FPFilterTwoDirProcessor(FPBehaveVideoProcessor):
         parser.add_argument('--occ_frames_allowed', default=15, type=int)
         # add attemps
         parser.add_argument('--max_attempts', default=5, type=int)
-        
+        parser.add_argument(
+            '--zfar',
+            default=None,
+            type=float,
+            help='Depth far-plane clip in meters. If omitted, fp_filter picks a default and may auto-increase on failure.',
+        )
 
         return parser
 

@@ -264,6 +264,11 @@ class FoundationPose:
     poses = poses.data.cpu().numpy()
     center = self.guess_translation(depth=depth, mask=ob_mask, K=K)
     if np.allclose(center, np.zeros(3)):
+      if self.pose_last is None:
+        logging.info(f'center is all zero and no previous pose is available')
+        self.poses = None
+        self.scores = None
+        return None
       logging.info(f'center is all zero, use previous center')
       center = self.pose_last[..., :3, 3].clone().cpu().numpy()
 
@@ -290,6 +295,7 @@ class FoundationPose:
       outfile = f'{self.debug_dir}/vis_refiner.png' if vis_refine_path is None else vis_refine_path
       imageio.imwrite(outfile, vis)
 
+    torch.cuda.empty_cache()
     scores, vis = self.scorer.predict(mesh=self.mesh, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map,
                                       mesh_tensors=self.mesh_tensors, glctx=self.glctx, mesh_diameter=self.diameter, get_vis=self.debug>=2, 
                                       no_text=False, rgb_only=rgb_only) 
@@ -341,5 +347,4 @@ class FoundationPose:
       extra['vis'] = vis
     self.pose_last = pose
     return (pose@self.get_tf_to_centered_mesh()).data.cpu().numpy().reshape(4,4)
-
 

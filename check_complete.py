@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def main() -> None:
-    intercap_root = Path(__file__).resolve().parent / "experiments" / "intercap"
+    intercap_root = Path(__file__).resolve().parent / "experiments" / "open4dhoi"
 
     if not intercap_root.exists() or not intercap_root.is_dir():
         print(f"[ERROR] Directory not found: {intercap_root}")

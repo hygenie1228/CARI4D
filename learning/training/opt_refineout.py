@@ -44,6 +44,128 @@ from learning.training.training_utils import TrainState
 
 HAND_JOINT_INDICES = [22, 23+15]
 
+
+def _pen_loss_chunk_size() -> int:
+    return max(1, int(os.environ.get("CARI4D_PEN_CHUNK", "8")))
+
+
+def _collision_loss_mean_chunked(smplh_model, obj_pts_posed, smplh_output):
+    """Run volumetric penetration loss in small batches to avoid CUDA OOM."""
+    from types import SimpleNamespace
+
+    chunk = _pen_loss_chunk_size()
+    n = obj_pts_posed.shape[0]
+    zero = obj_pts_posed.sum() * 0.0
+    if n <= chunk:
+        valid = (
+            torch.isfinite(obj_pts_posed).flatten(1).all(dim=1)
+            & torch.isfinite(smplh_output.vertices).flatten(1).all(dim=1)
+        )
+        if not torch.all(valid):
+            if not torch.any(valid):
+                return zero
+            obj_pts_posed = obj_pts_posed[valid]
+            smplh_output = SimpleNamespace(
+                vertices=smplh_output.vertices[valid],
+                joints=smplh_output.joints[valid],
+                full_pose=smplh_output.full_pose[valid],
+            )
+        smplh_model.volume.detach_cache()
+        try:
+            return smplh_model.volume.collision_loss(obj_pts_posed, smplh_output)[0].mean()
+        except ValueError as e:
+            if "nan or inf" not in str(e):
+                raise
+            return zero
+
+    parts = []
+    for i in range(0, n, chunk):
+        j = min(i + chunk, n)
+        valid = (
+            torch.isfinite(obj_pts_posed[i:j]).flatten(1).all(dim=1)
+            & torch.isfinite(smplh_output.vertices[i:j]).flatten(1).all(dim=1)
+        )
+        if not torch.any(valid):
+            continue
+        smplh_model.volume.detach_cache()
+        chunk_out = SimpleNamespace(
+            vertices=smplh_output.vertices[i:j][valid],
+            joints=smplh_output.joints[i:j][valid],
+            full_pose=smplh_output.full_pose[i:j][valid],
+        )
+        try:
+            parts.append(
+                smplh_model.volume.collision_loss(obj_pts_posed[i:j][valid], chunk_out)[0]
+            )
+        except ValueError as e:
+            if "nan or inf" not in str(e):
+                raise
+    if not parts:
+        return zero
+    return torch.cat(parts).mean()
+
+
+def _cv_point(pt, image_shape):
+    pt = np.asarray(pt).reshape(-1)
+    if pt.size < 2 or not np.all(np.isfinite(pt[:2])):
+        return None
+    x, y = int(round(float(pt[0]))), int(round(float(pt[1])))
+    h, w = image_shape[:2]
+    if x < 0 or y < 0 or x >= w or y >= h:
+        return None
+    return x, y
+
+
+def _pr_has_nonfinite(pr):
+    for key in ("pose_abs", "smpl_pose", "smpl_t", "betas"):
+        value = pr.get(key)
+        if torch.is_tensor(value) and not torch.isfinite(value).all():
+            return key
+    return None
+
+
+def _repair_nonfinite_sequence(value, name, identity_pose=False):
+    if not torch.is_tensor(value):
+        return value
+    if value.ndim == 0:
+        if torch.isfinite(value):
+            return value
+        print(f'Repairing non-finite scalar pr["{name}"] with zero')
+        return torch.zeros_like(value)
+
+    flat = value.reshape(value.shape[0], -1)
+    finite_rows = torch.isfinite(flat).all(dim=1)
+    if torch.all(finite_rows):
+        return value
+
+    repaired = value.clone()
+    bad_rows = torch.where(~finite_rows)[0]
+    good_rows = torch.where(finite_rows)[0]
+    print(f'Repairing {len(bad_rows)} non-finite rows in pr["{name}"]')
+    if len(good_rows) > 0:
+        for row in bad_rows:
+            nearest = good_rows[torch.argmin(torch.abs(good_rows - row))]
+            repaired[row] = repaired[nearest]
+        return repaired
+
+    repaired.zero_()
+    if identity_pose and repaired.shape[-2:] == (4, 4):
+        eye = torch.eye(4, dtype=repaired.dtype, device=repaired.device)
+        repaired[:] = eye
+    return repaired
+
+
+def _repair_pr_nonfinite(pr):
+    pr = dict(pr)
+    pr["pose_abs"] = _repair_nonfinite_sequence(pr["pose_abs"], "pose_abs", identity_pose=True)
+    pr["smpl_pose"] = _repair_nonfinite_sequence(pr["smpl_pose"], "smpl_pose")
+    pr["smpl_t"] = _repair_nonfinite_sequence(pr["smpl_t"], "smpl_t")
+    pr["betas"] = _repair_nonfinite_sequence(pr["betas"], "betas")
+    if "verts" in pr:
+        pr["verts"] = _repair_nonfinite_sequence(pr["verts"], "verts")
+    return pr
+
+
 class RefineOutOptimizer(BaseBehaveVideoData):
     def __init__(self, cfg: RefineOutOptimConfig):
         seq_name = osp.basename(cfg.pth_file).split('.')[0]
@@ -141,22 +263,38 @@ class RefineOutOptimizer(BaseBehaveVideoData):
             ckpt_file = ckpt_files[-1]
             ckpt_data = torch.load(ckpt_file, map_location='cpu', weights_only=False)
             pr = ckpt_data['pr']
-            smpl_pose = pr['smpl_pose'].clone() # 72dim 
-            smpl_trans = pr['smpl_t'].clone()
-            betas = pr['betas'].clone() 
-            frames_pr = [x.split('/')[-1] for x in pr['frames']]
-            train_state = pr['train_state']
-            print(f'Loaded checkpoint {ckpt_file}')
+            bad_key = _pr_has_nonfinite(pr)
+            if bad_key is not None:
+                print(f'Ignoring checkpoint {ckpt_file}: non-finite values in pr["{bad_key}"]')
+                ckpt_file = None
+                train_state = TrainState()
+                pr = pth_data['pr']
+                pth_data['in'] = pr
+                smpl_pose = pr['smpl_pose'].clone() # 72dim
+                smpl_trans = pr['smpl_t'].clone()
+                betas = pr['betas'].clone()
+            else:
+                smpl_pose = pr['smpl_pose'].clone() # 72dim 
+                smpl_trans = pr['smpl_t'].clone()
+                betas = pr['betas'].clone() 
+                frames_pr = [x.split('/')[-1] for x in pr['frames']]
+                train_state = pr['train_state']
+                print(f'Loaded checkpoint {ckpt_file}')
         else:
             train_state = TrainState()
             print(f'No checkpoint found, starting from scratch')
             pr = pth_data['pr'] 
             # copy pr to in 
             pth_data['in'] = pr 
-            smpl_pose = pr['smpl_pose'].clone() # 72dim 
+            smpl_pose = pr['smpl_pose'].clone() # 72dim
             smpl_trans = pr['smpl_t'].clone()
-            betas = pr['betas'].clone() 
+            betas = pr['betas'].clone()
         frames_pr = [x.split('/')[-1] for x in pr['frames']]
+        source_pr = _repair_pr_nonfinite(pth_data['pr'])
+        pr = _repair_pr_nonfinite(pr)
+        smpl_pose = pr['smpl_pose'].clone() # 72dim
+        smpl_trans = pr['smpl_t'].clone()
+        betas = pr['betas'].clone()
         if train_state.step >= self.cfg.num_steps:
             print(f'Step {train_state.step} is greater than or equal to num_steps {self.cfg.num_steps}, skipping')
             return
@@ -225,9 +363,9 @@ class RefineOutOptimizer(BaseBehaveVideoData):
             'obj_axis': obj_axis if not self.cfg.opt_rot else obj_axis.requires_grad_(True), 
             'obj_trans': obj_trans if not self.cfg.opt_trans else obj_trans.requires_grad_(True),
             'obj_axis_orig': obj_axis.clone(),
-            'obj_trans_orig': pth_data['pr']['pose_abs'][:, :3, 3].clone().to(self.device),
-            'smpl_trans_orig': pth_data['pr']['smpl_t'].clone().to(self.device),
-            'smpl_pose_orig': pth_data['pr']['smpl_pose'][:, 3:66].clone().to(self.device),
+            'obj_trans_orig': pr['pose_abs'][:, :3, 3].clone().to(self.device),
+            'smpl_trans_orig': pr['smpl_t'].clone().to(self.device),
+            'smpl_pose_orig': pr['smpl_pose'][:, 3:66].clone().to(self.device),
 
             # human params 
             'smpl_pose_global': smpl_global_pose.to(self.device), # do not optimize global orientation, assume it is already good  if not self.cfg.opt_smpl_pose else smpl_global_pose.requires_grad_(True).to(self.device),
@@ -287,12 +425,13 @@ class RefineOutOptimizer(BaseBehaveVideoData):
                 f'No BEHAVE packed GT at {pack_file}; using 2D joint targets from pr["verts"] '
                 f'reprojection (same camera as optimization). For full BEHAVE eval, add *_GT-packed.pkl.'
             )
-            if 'verts' not in pth_data['pr']:
+            verts_source = pr if 'verts' in pr else source_pr
+            if 'verts' not in verts_source:
                 raise FileNotFoundError(
                     f'{pack_file} missing and pr has no verts; cannot build 2D targets. '
                     'Use a CoCoNet .pth that includes verts, or provide packed GT.'
                 )
-            verts_pr = pth_data['pr']['verts']
+            verts_pr = verts_source['verts']
             if not isinstance(verts_pr, torch.Tensor):
                 verts_pr = torch.from_numpy(verts_pr)
             verts_pr = verts_pr.float().to(self.device)
@@ -470,9 +609,10 @@ class RefineOutOptimizer(BaseBehaveVideoData):
             # penetration loss: something is cached here, making the repeatition runtime error.
             loss_pen = 0
             if self.cfg.w_pen > 0 and step > self.cfg.pen_loss_start * self.cfg.num_steps:
-                smplh_model.volume.detach_cache() # avoid repeated backprop
-                # TODO: do min-chunk to allow larger batch size overall.
-                loss_pen = smplh_model.volume.collision_loss(obj_pts_posed, smplh_output)[0].mean() * self.cfg.w_pen
+                loss_pen = (
+                    _collision_loss_mean_chunked(smplh_model, obj_pts_posed, smplh_output)
+                    * self.cfg.w_pen
+                )
             t4 = time.time()    
 
             # temporal smoothness loss: on SMPL vertices and object vertices  
@@ -513,7 +653,22 @@ class RefineOutOptimizer(BaseBehaveVideoData):
             # compute the total loss 
             loss = loss_j2d + loss_contact + loss_sil + loss_pen + loss_temp + loss_velo + loss_init_ot + loss_init_ht + loss_init_p
 
+            if not torch.isfinite(loss):
+                print(f"Skipping step {step}: non-finite loss {loss.detach().item()}")
+                optimizer.zero_grad()
+                train_state.step += 1
+                continue
             loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                [p for group in optimizer.param_groups for p in group['params']],
+                max_norm=10.0,
+                error_if_nonfinite=False,
+            )
+            if not torch.isfinite(grad_norm):
+                print(f"Skipping step {step}: non-finite gradient norm {grad_norm}")
+                optimizer.zero_grad()
+                train_state.step += 1
+                continue
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
@@ -674,9 +829,13 @@ class RefineOutOptimizer(BaseBehaveVideoData):
                             j2d_gt[~j2d_mask.repeat(2, -1)] = 0 # set to -1 to avoid drawing 
 
                             for j1, j2 in zip(j2d_pr, j2d_gt):
-                                cv2.circle(img, (j1[0], j1[1]), 3, (0, 255, 255), -1)
-                                cv2.circle(img, (j2[0], j2[1]), 3, (255, 0, 0), -1)
-                                cv2.circle(vf, (j1[0], j1[1]), 3, (0, 255, 255), -1)
+                                p1 = _cv_point(j1, img.shape)
+                                p2 = _cv_point(j2, img.shape)
+                                if p1 is not None:
+                                    cv2.circle(img, p1, 3, (0, 255, 255), -1)
+                                    cv2.circle(vf, p1, 3, (0, 255, 255), -1)
+                                if p2 is not None:
+                                    cv2.circle(img, p2, 3, (255, 0, 0), -1)
                         img = np.concatenate([img[y1:y2, x1:x2], vf[y1:y2, x1:x2], vs[y1:y2, x1:x2]], 1)
                         # add frame time info
                         frame_time = frames_pr_chunk[j]
@@ -696,6 +855,8 @@ class RefineOutOptimizer(BaseBehaveVideoData):
                 
                 vw.close()
                 print(f"Visualization saved to {video_file_out} done")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             
         if not self.cfg.no_wandb:

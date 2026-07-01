@@ -30,7 +30,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   B = len(ob_in_cams)
   poseA = torch.as_tensor(ob_in_cams, dtype=torch.float, device='cuda')
 
-  bs = 512
+  bs = int(os.environ.get('CARI4D_NVDIFFRAST_BS', '512'))
   rgb_rs = []
   depth_rs = []
   normal_rs = []

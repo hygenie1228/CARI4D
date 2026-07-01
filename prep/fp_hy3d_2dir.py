@@ -145,6 +145,7 @@ if __name__ == '__main__':
     except Exception as e:
         print(args.video, 'failed')
         traceback.print_exc()
+        raise SystemExit(1) from e
     
 
 
