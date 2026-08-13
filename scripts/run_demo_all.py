@@ -1,34 +1,42 @@
 #!/usr/bin/env python3
-"""Run scripts/run_open4dhoi.sh once per subdirectory of experiments/open4dhoi."""
+"""Run scripts/run_demo_test.sh once per subdirectory of experiments/demo_test."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+# One-off: seed human pose/shape from exp2 for skateboard-demo_3 instead of NLF.
+_DEMO_HUMAN_INIT_OVERRIDE = {
+    "skateboard-demo_3": "exp2/demo_test/skateboard-demo_3/human/human_params_init.npz",
+}
+
 
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
-    open4dhoi_root = root / "experiments" / "open4dhoi"
-    script = root / "scripts" / "run_open4dhoi.sh"
+    demo_root = root / "experiments" / "demo_test"
+    script = root / "scripts" / "run_demo_test.sh"
 
-    if not open4dhoi_root.is_dir():
-        print(f"Missing directory: {open4dhoi_root}", file=sys.stderr)
+    if not demo_root.is_dir():
+        print(f"Missing directory: {demo_root}", file=sys.stderr)
         sys.exit(1)
     if not script.is_file():
         print(f"Missing script: {script}", file=sys.stderr)
         sys.exit(1)
 
     exp_dirs = sorted(
-        p for p in open4dhoi_root.iterdir() if p.is_dir() and not p.name.startswith(".")
+        p for p in demo_root.iterdir() if p.is_dir() and not p.name.startswith(".")
     )
     if not exp_dirs:
-        print(f"No experiment folders under {open4dhoi_root}", file=sys.stderr)
+        print(f"No experiment folders under {demo_root}", file=sys.stderr)
         sys.exit(1)
 
     failures: list[str] = []
-    
-    exp_dirs = exp_dirs[1::2]
+    exp_dirs = exp_dirs
     for exp in exp_dirs:
+        if "skateboard-demo_3" not in str(exp):
+            continue
+            
         rel = exp.relative_to(root)
         human_npz = exp / "human" / "human_params.npz"
         object_npz = exp / "object" / "object_params.npz"
@@ -38,7 +46,17 @@ def main() -> None:
         print(f"==> {rel}", flush=True)
 
         try:
-            r = subprocess.run(["bash", str(script), str(rel)], cwd=root)
+            env = os.environ.copy()
+            init_rel = _DEMO_HUMAN_INIT_OVERRIDE.get(exp.name)
+            if init_rel is not None:
+                init_path = root / init_rel
+                if not init_path.is_file():
+                    print(f"!!! missing human init override: {init_path}", file=sys.stderr)
+                    failures.append(str(rel))
+                    continue
+                env["DEMO_HUMAN_INIT_NPZ"] = str(init_path)
+                print(f"    using human init override: {init_rel}", flush=True)
+            r = subprocess.run(["bash", str(script), str(rel)], cwd=root, env=env)
             if r.returncode != 0:
                 print(
                     f"!!! {rel} failed with exit code {r.returncode}",

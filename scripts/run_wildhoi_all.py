@@ -5,6 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# skateboard_0359_026
+# skateboard_0339_010
+# skateboard_0045_002
 
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
